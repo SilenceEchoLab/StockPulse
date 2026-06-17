@@ -1,0 +1,51 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* 
+   * 统一的配色替换方案 (Unified Color Scheme)
+   * 来源于 DESIGN.md 规范
+   */
+  --color-canvas-dark: #0b0e11;
+  --color-canvas-light: #ffffff;
+  
+  --color-surface-card-dark: #1e2329;
+  --color-surface-elevated-dark: #2b3139;
+  --color-surface-soft-light: #fafafa;
+  --color-surface-strong-light: #f5f5f5;
+  
+  --color-primary: #FCD535; /* Binance Yellow */
+  --color-primary-active: #f0b90b;
+  --color-primary-disabled: #3a3a1f;
+  
+  --color-hairline-light: #eaecef;
+  --color-hairline-dark: #2b3139;
+  --color-border-strong: #cdd1d6;
+  
+  --color-ink: #181a20;
+  --color-body-dark: #eaecef;
+  --color-body-light: #181a20;
+  --color-muted: #707a8a;
+  --color-muted-strong: #929aa5;
+  
+  --color-trading-up: #0ecb81;
+  --color-trading-down: #f6465d;
+  --color-info: #3b82f6;
+
+  /* 统一的圆角方案 (Unified Border Radius) */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-pill: 9999px;
+}
+
+@layer base {
+  body {
+    @apply bg-canvas-dark text-body-dark font-sans antialiased;
+  }
+}

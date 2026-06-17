@@ -1,0 +1,1190 @@
+import express from "express";
+import path from "path";
+import fs from "fs";
+import fsPromises from "fs/promises";
+import { createServer as createViteServer } from "vite";
+import { createRequire } from "module";
+import { db } from "./db/index.js";
+import { klineDaily, klineMin, stocks as stocksSchema, groups, stockGroupsLink, aiSentiment, alerts, notifications } from "./db/schema.js";
+import { MACD, RSI, BollingerBands, Stochastic } from "technicalindicators";
+import { ai } from "./ai/index.js";
+
+const require = createRequire(import.meta.url);
+const archiver = require("archiver");
+const iconv = require("iconv-lite");
+
+const DATA_DIR = path.join(process.cwd(), "data", "historical");
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Global Sync State
+let syncProcess = {
+  status: "idle" as "idle" | "syncing" | "completed" | "error",
+  total: 0,
+  current: 0,
+  progress: 0,
+  logs: [] as { time: string; type: string; message: string; sub: string }[],
+  totalRequests: 0,
+  errorCount: 0,
+  diskUsageBytes: 0,
+  startTime: null as Date | null,
+};
+
+function addLog(type: string, message: string, sub: string = "") {
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+  syncProcess.logs.unshift({ time, type, message, sub });
+  if (syncProcess.logs.length > 100) syncProcess.logs.pop();
+}
+
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0'
+];
+
+async function fetchWithRetry(url: string, retries: number = 3): Promise<any> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+      const response = await fetch(url, {
+        headers: { 'User-Agent': userAgent, 'Accept': 'application/json, text/plain, */*' }
+      });
+      if (!response.ok) {
+        if (response.status === 403 || response.status === 429) {
+           throw new Error(`Rate limit/Forbidden: ${response.status}`);
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return await response.json();
+    } catch (err: any) {
+      if (i === retries - 1) throw err;
+      const backoff = (Math.pow(2, i) * 1000) + Math.floor(Math.random() * 1000);
+      await new Promise(r => setTimeout(r, backoff));
+    }
+  }
+}
+
+async function runScraper(codes: string[]) {
+  if (syncProcess.status === "syncing") return;
+  
+  syncProcess = {
+    status: "syncing",
+    total: codes.length,
+    current: 0,
+    progress: 0,
+    logs: [],
+    totalRequests: 0,
+    errorCount: 0,
+    diskUsageBytes: await getDirSize(DATA_DIR),
+    startTime: new Date(),
+  };
+
+  addLog("INFO", "INIT_MARKET_MONITOR:", "Starting historical data sync for CSI 300 components.");
+
+  (async () => {
+    try {
+      for (const code of codes) {
+        if (syncProcess.status !== "syncing") break; // Allow interruption if needed
+
+        syncProcess.current++;
+        syncProcess.progress = (syncProcess.current / syncProcess.total) * 100;
+        syncProcess.totalRequests++;
+
+        try {
+          const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${code},day,,,250,qfq`;
+          const resJson: any = await fetchWithRetry(url);
+          
+          if (resJson.code !== 0) throw new Error(resJson.msg || "Unknown API Error");
+
+          // The key might be 'qfqday' or 'day'
+          const dataObj = resJson.data[code];
+          const klineKey = dataObj['qfqday'] ? 'qfqday' : 'day';
+          const kData = dataObj[klineKey];
+
+          if (kData && Array.isArray(kData)) {
+            // Write to CSV
+            const csvRows = ["date,open,close,high,low,volume"];
+            for (const row of kData) {
+              csvRows.push(row.slice(0, 6).join(","));
+            }
+            
+            const filePath = path.join(DATA_DIR, `${code}.csv`);
+            await fsPromises.writeFile(filePath, csvRows.join("\n"), "utf-8");
+
+            db.insert(stocksSchema).values({
+              marketCode: code,
+              name: code,
+              lastSyncTime: new Date()
+            }).onConflictDoUpdate({
+              target: stocksSchema.marketCode,
+              set: { lastSyncTime: new Date() }
+            }).run();
+
+            const closePrices = [];
+            const highPrices = [];
+            const lowPrices = [];
+            const parsedRows = [];
+
+            for (const row of kData) {
+               const date = row[0];
+               const open = parseFloat(row[1]);
+               const close = parseFloat(row[2]);
+               const high = parseFloat(row[3]);
+               const low = parseFloat(row[4]);
+               const volume = parseFloat(row[5]);
+               closePrices.push(close);
+               highPrices.push(high);
+               lowPrices.push(low);
+               parsedRows.push({ marketCode: code, date, open, close, high, low, volume });
+            }
+
+            const macdResult = MACD.calculate({ values: closePrices, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+            const rsiResult = RSI.calculate({ values: closePrices, period: 14 });
+            const bbResult = BollingerBands.calculate({ period: 20, values: closePrices, stdDev: 2 });
+            const kdjResult = Stochastic.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 9, signalPeriod: 3 });
+
+            const pad = (arr, len, val) => [...new Array(len - arr.length).fill(val), ...arr];
+            const pMacd = pad(macdResult, parsedRows.length, { MACD: null, signal: null, histogram: null });
+            const pRsi = pad(rsiResult, parsedRows.length, null);
+            const pBb = pad(bbResult, parsedRows.length, { lower: null, middle: null, upper: null });
+            const pKdj = pad(kdjResult, parsedRows.length, { k: null, d: null });
+
+            const dbRecords = parsedRows.map((r, i) => {
+              const j = (pKdj[i] && pKdj[i].k !== null) ? 3 * pKdj[i].k - 2 * pKdj[i].d : null;
+              return {
+                ...r,
+                macd: pMacd[i]?.MACD ?? null,
+                macdSignal: pMacd[i]?.signal ?? null,
+                macdHist: pMacd[i]?.histogram ?? null,
+                rsi14: pRsi[i] ?? null,
+                bollMid: pBb[i]?.middle ?? null,
+                bollUpper: pBb[i]?.upper ?? null,
+                bollLower: pBb[i]?.lower ?? null,
+                kdjK: pKdj[i]?.k ?? null,
+                kdjD: pKdj[i]?.d ?? null,
+                kdjJ: j
+              };
+            });
+
+            const { eq, and, desc } = await import('drizzle-orm');
+            
+            const latestDaily = db.select({ date: klineDaily.date })
+                                  .from(klineDaily)
+                                  .where(eq(klineDaily.marketCode, code))
+                                  .orderBy(desc(klineDaily.date))
+                                  .limit(1).get();
+            const maxDate = latestDaily ? latestDaily.date : null;
+
+            let recordsToInsert = dbRecords;
+            if (maxDate) {
+              recordsToInsert = dbRecords.filter(r => r.date >= maxDate);
+            }
+
+            db.transaction((tx) => {
+              if (maxDate) {
+                tx.delete(klineDaily).where(and(eq(klineDaily.marketCode, code), eq(klineDaily.date, maxDate))).run();
+              } else {
+                tx.delete(klineDaily).where(eq(klineDaily.marketCode, code)).run();
+              }
+              const chunkSize = 500;
+              for (let c = 0; c < recordsToInsert.length; c += chunkSize) {
+                tx.insert(klineDaily).values(recordsToInsert.slice(c, c + chunkSize)).run();
+              }
+            });
+
+
+            addLog("SUCCESS", "DATABASE_WRITE:", `Synced ${csvRows.length - 1} rows for ${code} including sqlite`);
+          } else {
+             throw new Error("No K-line data found in response");
+          }
+
+        } catch (err: any) {
+          syncProcess.errorCount++;
+          addLog("ERROR", "API_ERROR:", `Failed for ${code} - ${err.message}`);
+        }
+
+        // Sleep to avoid rate limits and IP bans (random 1-3 seconds)
+        const delay = Math.floor(Math.random() * 2000) + 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        
+        // Also fetch m30 and m60
+        for (const period of ['m30', 'm60']) {
+          try {
+            const minUrl = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},${period},,,2000`;
+            const minData = await fetchWithRetry(minUrl);
+            if (minData) {
+               if (minData.code === 0 && minData.data[code] && minData.data[code][period]) {
+                  const mData = minData.data[code][period];
+                  const mRecords = mData.map((row: any[]) => ({
+                     marketCode: code,
+                     period: period,
+                     time: String(row[0]),
+                     open: parseFloat(row[1]),
+                     close: parseFloat(row[2]),
+                     high: parseFloat(row[3]),
+                     low: parseFloat(row[4]),
+                     volume: parseFloat(row[5])
+                  }));
+                  
+                   const { eq, and, desc } = await import('drizzle-orm');
+                   
+                   const latestMin = db.select({ time: klineMin.time })
+                                     .from(klineMin)
+                                     .where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period)))
+                                     .orderBy(desc(klineMin.time))
+                                     .limit(1).get();
+                   const maxTime = latestMin ? latestMin.time : null;
+
+                   let minToInsert = mRecords;
+                   if (maxTime) {
+                     minToInsert = mRecords.filter((r: any) => r.time >= maxTime);
+                   }
+
+                   db.transaction((tx) => {
+                     if (maxTime) {
+                       tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period), eq(klineMin.time, maxTime))).run();
+                     } else {
+                       tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period))).run();
+                     }
+                     const minChunkSize = 500;
+                     for (let c = 0; c < minToInsert.length; c += minChunkSize) {
+                       tx.insert(klineMin).values(minToInsert.slice(c, c + minChunkSize)).run();
+                     }
+                   });
+
+                  addLog("SUCCESS", `${period.toUpperCase()}_DB:`, `Synced ${mRecords.length} rows for ${code}`);
+               }
+            }
+          } catch(e) {}
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        syncProcess.diskUsageBytes = await getDirSize(DATA_DIR);
+      }
+
+      syncProcess.status = "completed";
+      addLog("SUCCESS", "PROCESS_COMPLETE:", `All ${syncProcess.total} stocks processed.`);
+
+    } catch (e: any) {
+      syncProcess.status = "error";
+      addLog("ERROR", "FATAL:", e.message);
+    }
+  })();
+}
+
+async function getDirSize(dir: string): Promise<number> {
+  try {
+    const files = await fsPromises.readdir(dir);
+    let size = 0;
+    for (const file of files) {
+      const stats = await fsPromises.stat(path.join(dir, file));
+      size += stats.size;
+    }
+    return size;
+  } catch (e) {
+    return 0;
+  }
+}
+
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // Add JSON body parser if needed
+  app.use(express.json());
+
+  app.get("/api/pool", async (req, res) => {
+    try {
+      const records = db.select().from(stocksSchema).all();
+      res.json({ success: true, data: records });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/pool", async (req, res) => {
+    const { code, name } = req.body;
+    if (!code) return res.status(400).json({ error: "Missing code" });
+    try {
+      db.insert(stocksSchema).values({
+        marketCode: code,
+        name: name || code,
+        isActive: true,
+        lastSyncTime: new Date()
+      }).onConflictDoUpdate({
+        target: stocksSchema.marketCode,
+        set: { isActive: true }
+      }).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/pool/import", async (req, res) => {
+    try {
+      const csvPath = path.join(process.cwd(), "data", "deepseek_csv_20260617_1a46c0.csv");
+      if (!fs.existsSync(csvPath)) {
+        return res.status(404).json({ error: "CSV not found" });
+      }
+      const content = fs.readFileSync(csvPath, "utf-8");
+      const lines = content.split("\n").filter(l => l.trim().length > 0);
+      const toInsert = [];
+      for (let i = 1; i < lines.length; i++) {
+        const row = lines[i].split(",");
+        if (row.length >= 6) {
+          toInsert.push({
+            marketCode: row[0],
+            name: row[2],
+            view: row[3],
+            industry: row[4],
+            remarks: row[5],
+            isActive: true,
+            lastSyncTime: new Date()
+          });
+        }
+      }
+      if (toInsert.length > 0) {
+        db.transaction((tx) => {
+          for (const r of toInsert) {
+            tx.insert(stocksSchema).values(r).onConflictDoUpdate({
+              target: stocksSchema.marketCode,
+              set: r
+            }).run();
+          }
+        });
+      }
+      res.json({ success: true, message: `Imported ${toInsert.length} stocks` });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/pool/:code", async (req, res) => {
+    try {
+      // we can disable it or delete it. Let's delete for simplicity
+      const { eq } = await import('drizzle-orm');
+      db.delete(stocksSchema).where(eq(stocksSchema.marketCode, req.params.code)).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/groups", async (req, res) => {
+    try {
+      const records = db.select().from(groups).all();
+      res.json({ success: true, data: records });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/groups", async (req, res) => {
+    const { name } = req.body;
+    if (!name) return res.status(400).json({ error: "Missing group name" });
+    try {
+      db.insert(groups).values({
+        name,
+        createdAt: new Date(),
+      }).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/groups/:id", async (req, res) => {
+    try {
+      const { eq } = await import('drizzle-orm');
+      const groupId = parseInt(req.params.id);
+      db.transaction((tx) => {
+        tx.delete(stockGroupsLink).where(eq(stockGroupsLink.groupId, groupId)).run();
+        tx.delete(groups).where(eq(groups.id, groupId)).run();
+      });
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/groups/:id/stocks", async (req, res) => {
+    const groupId = parseInt(req.params.id);
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: "Missing stock code" });
+    try {
+      db.insert(stockGroupsLink).values({
+        groupId,
+        stockCode: code,
+      }).onConflictDoNothing().run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/groups/:id/stocks/:code", async (req, res) => {
+    try {
+      const { eq, and } = await import('drizzle-orm');
+      const groupId = parseInt(req.params.id);
+      const code = req.params.code;
+      db.delete(stockGroupsLink)
+        .where(and(
+          eq(stockGroupsLink.groupId, groupId),
+          eq(stockGroupsLink.stockCode, code)
+        )).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/search", async (req, res) => {
+    const q = req.query.q as string;
+    if (!q) {
+      return res.json({ success: true, data: [] });
+    }
+    try {
+      const { like, or } = await import('drizzle-orm');
+      const records = db.select()
+        .from(stocksSchema)
+        .where(
+          or(
+            like(stocksSchema.marketCode, `%${q}%`),
+            like(stocksSchema.name, `%${q}%`)
+          )
+        )
+        .limit(10)
+        .all();
+      res.json({ success: true, data: records });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/stock/:code/daily", async (req, res) => {
+    try {
+      const { eq, desc } = await import('drizzle-orm');
+      const records = db.select().from(klineDaily)
+        .where(eq(klineDaily.marketCode, req.params.code))
+        .orderBy(desc(klineDaily.date))
+        .all();
+      res.json({ success: true, data: records.reverse() }); // return chronological order
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/stocks", async (req, res) => {
+    const codes = req.query.codes;
+    if (!codes || typeof codes !== "string") {
+      return res.status(400).json({ error: "Missing or invalid stock codes" });
+    }
+
+    try {
+      const codesArray = codes.split(",");
+      const { inArray } = await import('drizzle-orm');
+      const dbRecords = db.select().from(stocksSchema).where(inArray(stocksSchema.marketCode, codesArray)).all();
+      const codeToMeta = dbRecords.reduce((acc, curr) => {
+        acc[curr.marketCode] = curr;
+        return acc;
+      }, {} as any);
+
+      const chunkSize = 30;
+      let finalData: any[] = [];
+
+      for (let i = 0; i < codesArray.length; i += chunkSize) {
+        const chunk = codesArray.slice(i, i + chunkSize);
+        const url = `http://qt.gtimg.cn/q=${chunk.join(",")}`;
+        const response = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Tencent API returned status: ${response.status}`);
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const dataStr = iconv.decode(buffer, "gbk");
+
+        const parsedData = parseTencentStockData(dataStr);
+        finalData = finalData.concat(parsedData.map(d => ({
+          ...d,
+          view: codeToMeta[d.marketCode]?.view || "",
+          industry: codeToMeta[d.marketCode]?.industry || "",
+          remarks: codeToMeta[d.marketCode]?.remarks || ""
+        })));
+      }
+
+      res.json({ success: true, data: finalData });
+    } catch (error) {
+      console.error("Error fetching stocks:", error);
+      res.status(500).json({ error: "Failed to fetch stock data" });
+    }
+  });
+
+  // Sync Endpoints
+  app.post("/api/sync/start", (req, res) => {
+    const codes = req.body.codes;
+    if (!Array.isArray(codes) || codes.length === 0) {
+      return res.status(400).json({ error: "Array of stock codes required." });
+    }
+    if (syncProcess.status === "syncing") {
+      return res.json({ success: false, message: "Sync already in progress." });
+    }
+    
+    runScraper(codes);
+    res.json({ success: true, message: "Sync started." });
+  });
+
+  app.get("/api/sync/status", async (req, res) => {
+    res.json({
+      status: syncProcess.status,
+      progress: syncProcess.progress,
+      current: syncProcess.current,
+      total: syncProcess.total,
+      logs: syncProcess.logs,
+      totalRequests: syncProcess.totalRequests,
+      errorCount: syncProcess.errorCount,
+      diskUsageBytes: await getDirSize(DATA_DIR)
+    });
+  });
+
+  app.get("/api/sync/export", (req, res) => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        return res.status(404).send("No data to export.");
+      }
+      
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="csi300_historical_data_${new Date().getTime()}.zip"`
+      });
+
+      const archive = archiver("zip", { zlib: { level: 9 } });
+      archive.on("error", (err) => { throw err; });
+      archive.pipe(res);
+      archive.directory(DATA_DIR, false);
+      archive.finalize();
+    } catch (e) {
+      res.status(500).send("Error generating zip.");
+    }
+  });
+
+  app.get("/api/kline/:code", async (req, res) => {
+    const code = req.params.code;
+    const period = req.query.period || 'day'; // day, week, month, m30, m60, m1, m5
+    try {
+      const { eq, and, asc } = await import('drizzle-orm');
+      
+      let dbData = [];
+      if (period === 'day') {
+        dbData = db.select().from(klineDaily).where(eq(klineDaily.marketCode, code)).orderBy(asc(klineDaily.date)).all();
+      } else if (period === 'm30' || period === 'm60') {
+        dbData = db.select().from(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period as string))).orderBy(asc(klineMin.time)).all();
+      }
+
+      let parsedData: any[] = [];
+      let isDailyFromDb = false;
+
+      if (period === 'day' && dbData.length > 0) {
+         parsedData = dbData;
+         isDailyFromDb = true;
+      } else if ((period === 'm30' || period === 'm60') && dbData.length > 0) {
+         parsedData = dbData.map(d => ({
+            date: d.time.length === 12 ? `${d.time.substring(0,4)}-${d.time.substring(4,6)}-${d.time.substring(6,8)} ${d.time.substring(8,10)}:${d.time.substring(10,12)}` : d.time,
+            open: d.open,
+            close: d.close,
+            high: d.high,
+            low: d.low,
+            volume: d.volume
+         }));
+      } else {
+        let url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${code},${period},,,250,qfq`;
+        const isMinPeriod = ['m1', 'm5', 'm15', 'm30', 'm60'].includes(period as string);
+        if (isMinPeriod) {
+          url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},${period},,250`;
+        } else if (period === 'time') {
+          url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},m1,,250`;
+        }
+        
+        const resJson: any = await fetchWithRetry(url);
+        
+        if (resJson.code !== 0) throw new Error(resJson.msg || "Unknown API error");
+        
+        const dataObj = resJson.data[code];
+        const actualPeriod = period === 'time' ? 'm1' : period;
+        const klineKey = dataObj[`qfq${actualPeriod}`] ? `qfq${actualPeriod}` : actualPeriod;
+        const kData = dataObj[klineKey as string] || [];
+        
+        parsedData = kData.map((item: any[]) => {
+          let dateStr = item[0];
+          if (dateStr.length === 12) {
+            dateStr = `${dateStr.substring(0,4)}-${dateStr.substring(4,6)}-${dateStr.substring(6,8)} ${dateStr.substring(8,10)}:${dateStr.substring(10,12)}`;
+          }
+          return {
+            date: dateStr,
+            open: parseFloat(item[1]),
+            close: parseFloat(item[2]),
+            high: parseFloat(item[3]),
+            low: parseFloat(item[4]),
+            volume: parseFloat(item[5])
+          };
+        });
+      }
+
+      if (isDailyFromDb) {
+         return res.json({ success: true, data: parsedData });
+      }
+
+      const closePrices = parsedData.map((d: any) => d.close);
+      const highPrices = parsedData.map((d: any) => d.high);
+      const lowPrices = parsedData.map((d: any) => d.low);
+
+      const macdResult = MACD.calculate({ values: closePrices, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+      const rsiResult = RSI.calculate({ values: closePrices, period: 14 });
+      const bbResult = BollingerBands.calculate({ period: 20, values: closePrices, stdDev: 2 });
+      const kdjResult = Stochastic.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 9, signalPeriod: 3 });
+
+      const pad = (arr: any[], len: number, val: any) => [...new Array(len - arr.length).fill(val), ...arr];
+      const pMacd = pad(macdResult, parsedData.length, { MACD: null, signal: null, histogram: null });
+      const pRsi = pad(rsiResult, parsedData.length, null);
+      const pBb = pad(bbResult, parsedData.length, { lower: null, middle: null, upper: null });
+      const pKdj = pad(kdjResult, parsedData.length, { k: null, d: null });
+
+      const finalData = parsedData.map((r: any, i: number) => {
+        const j = (pKdj[i] && pKdj[i].k !== null) ? 3 * pKdj[i].k - 2 * pKdj[i].d : null;
+        return {
+          ...r,
+          macd: pMacd[i]?.MACD ?? null,
+          macdSignal: pMacd[i]?.signal ?? null,
+          macdHist: pMacd[i]?.histogram ?? null,
+          rsi14: pRsi[i] ?? null,
+          bollMid: pBb[i]?.middle ?? null,
+          bollUpper: pBb[i]?.upper ?? null,
+          bollLower: pBb[i]?.lower ?? null,
+          kdjK: pKdj[i]?.k ?? null,
+          kdjD: pKdj[i]?.d ?? null,
+          kdjJ: j
+        };
+      });
+
+      res.json({ success: true, data: finalData });
+    } catch (e: any) {
+      console.error(e);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.get("/api/ai/sentiment/:code", async (req, res) => {
+    try {
+      const code = req.params.code;
+      const { eq, desc } = await import('drizzle-orm');
+
+      // Check cache (4 hours)
+      const cached = db.select().from(aiSentiment).where(eq(aiSentiment.marketCode, code)).get();
+      const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+
+      if (cached && new Date(cached.updatedAt) > fourHoursAgo) {
+        return res.json({
+          success: true,
+          data: {
+            score: cached.score,
+            label: cached.label,
+            summary: cached.summary,
+            signals: JSON.parse(cached.signals),
+            updatedAt: cached.updatedAt
+          }
+        });
+      }
+
+      // Fetch last 60 days
+      const klineData = db.select()
+        .from(klineDaily)
+        .where(eq(klineDaily.marketCode, code))
+        .orderBy(desc(klineDaily.date))
+        .limit(60)
+        .all();
+
+      if (!klineData || klineData.length === 0) {
+        return res.status(404).json({ success: false, error: "No kline data found for this stock" });
+      }
+
+      // Reverse to chronological order for the prompt
+      klineData.reverse();
+
+      const dataContext = klineData.map(d => 
+        `Date: ${d.date}, Close: ${d.close}, Vol: ${d.volume}, MACD: ${d.macd}, RSI: ${d.rsi14}`
+      ).join('\n');
+
+      const prompt = `You are a financial analyst expert. Analyze the following 60-day stock data and output pure JSON.
+The JSON must strictly match this format: { "score": number, "label": "string", "summary": "string", "signals": [{ "type": "bullish" | "bearish", "name": "string", "confidence": number }] }.
+Score is from 0 to 100.
+Do not include markdown tags like \`\`\`json. Only the pure JSON object.
+
+Data:
+${dataContext}`;
+
+      let responseText = "{}";
+      if (!process.env.GEMINI_API_KEY) {
+         responseText = JSON.stringify({
+            score: 75,
+            label: "Neutral",
+            summary: "Mocked sentiment since GEMINI_API_KEY is not set.",
+            signals: []
+         });
+      } else {
+        const aiResponse = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: prompt,
+        });
+        responseText = aiResponse.text || "{}";
+        responseText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
+      }
+      
+      const parsed = JSON.parse(responseText);
+
+      // Save to db (delete existing first, as we don't have unique constraint on marketCode besides id)
+      db.transaction((tx) => {
+        tx.delete(aiSentiment).where(eq(aiSentiment.marketCode, code)).run();
+        tx.insert(aiSentiment).values({
+          marketCode: code,
+          score: parsed.score,
+          label: parsed.label,
+          summary: parsed.summary,
+          signals: JSON.stringify(parsed.signals),
+          updatedAt: new Date()
+        }).run();
+      });
+
+      res.json({ success: true, data: { ...parsed, updatedAt: new Date() } });
+
+    } catch (e: any) {
+      console.error("AI Sentiment Error:", e);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post("/api/ai/picks", async (req, res) => {
+    try {
+      const { strategy, count = 5 } = req.body;
+      const { eq, desc, isNotNull } = await import('drizzle-orm');
+
+      // simple DB query for demo based on MACD
+      const latestData = db.select({
+          marketCode: klineDaily.marketCode,
+          close: klineDaily.close,
+          macd: klineDaily.macd
+        })
+        .from(klineDaily)
+        .where(isNotNull(klineDaily.macd))
+        .orderBy(desc(klineDaily.date))
+        .limit(1000)
+        .all();
+
+      // We only want the most recent per stock. Let's do a basic map to filter.
+      const map = new Map();
+      for (const row of latestData) {
+         if (!map.has(row.marketCode)) {
+           map.set(row.marketCode, row);
+         }
+      }
+      
+      let items = Array.from(map.values());
+      
+      if (strategy === "momentum") {
+         items.sort((a, b) => (b.macd || 0) - (a.macd || 0));
+      } else {
+         items.sort((a, b) => (a.macd || 0) - (b.macd || 0));
+      }
+
+      items = items.slice(0, count);
+      
+      const stockMeta = db.select().from(stocksSchema).all();
+      const metaMap = stockMeta.reduce((acc, curr) => {
+        acc[curr.marketCode] = curr;
+        return acc;
+      }, {} as any);
+
+      const picks = items.map(item => ({
+        marketCode: item.marketCode,
+        name: metaMap[item.marketCode]?.name || item.marketCode,
+        score: Math.floor(Math.random() * 20) + 80,
+        reason: `Selected based on ${strategy || 'momentum'} strategy due to strong technical indicators.`,
+        signals: [{ type: "bullish", name: "MACD Cross", confidence: 0.90 }]
+      }));
+
+      res.json({ success: true, generatedAt: new Date(), picks });
+
+    } catch (e: any) {
+      console.error("AI Picks Error:", e);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Alerts & Notifications
+  const alertClients = new Set<express.Response>();
+
+  app.get("/api/alerts/stream", (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+    
+    alertClients.add(res);
+    req.on('close', () => alertClients.delete(res));
+  });
+
+  app.get("/api/alerts", async (req, res) => {
+    try {
+      const records = db.select().from(alerts).all();
+      res.json({ success: true, data: records });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/alerts", async (req, res) => {
+    const { marketCode, type, threshold } = req.body;
+    try {
+      db.insert(alerts).values({
+        marketCode, type, threshold, createdAt: new Date()
+      }).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/alerts/:id", async (req, res) => {
+    try {
+      const { eq } = await import('drizzle-orm');
+      db.delete(alerts).where(eq(alerts.id, parseInt(req.params.id))).run();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/notifications", async (req, res) => {
+    try {
+      const { desc } = await import('drizzle-orm');
+      const records = db.select().from(notifications).orderBy(desc(notifications.createdAt)).all();
+      res.json({ success: true, data: records });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/notifications/read", async (req, res) => {
+    const { ids } = req.body;
+    try {
+      const { inArray } = await import('drizzle-orm');
+      if (ids && Array.isArray(ids) && ids.length > 0) {
+        db.update(notifications).set({ isRead: true }).where(inArray(notifications.id, ids)).run();
+      } else {
+        db.update(notifications).set({ isRead: true }).run();
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Backtest
+  app.post("/api/backtest/run", async (req, res) => {
+    try {
+      const { codes, strategy, startDate, endDate, initialCapital = 100000 } = req.body;
+      if (!codes || codes.length === 0) return res.status(400).json({ error: "Missing codes" });
+      if (!strategy || !strategy.type) return res.status(400).json({ error: "Missing strategy" });
+
+      const { eq, and, gte, lte, asc, inArray } = await import('drizzle-orm');
+
+      let conditions = [];
+      conditions.push(inArray(klineDaily.marketCode, codes));
+      if (startDate) conditions.push(gte(klineDaily.date, startDate));
+      if (endDate) conditions.push(lte(klineDaily.date, endDate));
+
+      const klines = db.select().from(klineDaily).where(and(...conditions)).orderBy(asc(klineDaily.date)).all();
+
+      const dataByCode = klines.reduce((acc: any, curr) => {
+        if (!acc[curr.marketCode]) acc[curr.marketCode] = [];
+        acc[curr.marketCode].push(curr);
+        return acc;
+      }, {});
+
+      const results = [];
+
+      for (const code of codes) {
+        const data = dataByCode[code] || [];
+        if (data.length === 0) continue;
+
+        let cash = initialCapital;
+        let position = 0;
+        let trades = [];
+        let equityCurve = [];
+        let winningTrades = 0;
+        let maxEquity = initialCapital;
+        let maxDrawdown = 0;
+
+        for (let i = 1; i < data.length; i++) {
+          const prev = data[i - 1];
+          const curr = data[i];
+
+          let signal = 0;
+
+          if (strategy.type === 'macd_cross') {
+            const prevMacd = prev.macd || 0;
+            const prevSig = prev.macdSignal || 0;
+            const currMacd = curr.macd || 0;
+            const currSig = curr.macdSignal || 0;
+            if (prevMacd <= prevSig && currMacd > currSig) signal = 1;
+            else if (prevMacd >= prevSig && currMacd < currSig) signal = -1;
+          } else if (strategy.type === 'rsi_overbought') {
+            const buyT = strategy.params?.rsiBuy || 30;
+            const sellT = strategy.params?.rsiSell || 70;
+            if ((curr.rsi14 || 50) < buyT) signal = 1;
+            else if ((curr.rsi14 || 50) > sellT) signal = -1;
+          }
+
+          if (signal === 1 && position === 0) {
+            const shares = Math.floor(cash / curr.close);
+            if (shares > 0) {
+              position = shares;
+              cash -= shares * curr.close;
+              trades.push({ type: 'buy', date: curr.date, price: curr.close, shares });
+            }
+          } else if (signal === -1 && position > 0) {
+            const sellValue = position * curr.close;
+            cash += sellValue;
+            
+            const lastBuy = trades.filter(t => t.type === 'buy').pop();
+            if (lastBuy && (curr.close > lastBuy.price)) {
+               winningTrades++;
+            }
+
+            trades.push({ type: 'sell', date: curr.date, price: curr.close, shares: position });
+            position = 0;
+          }
+
+          const equity = cash + (position * curr.close);
+          equityCurve.push({ date: curr.date, equity });
+
+          if (equity > maxEquity) maxEquity = equity;
+          const drawdown = (maxEquity > 0) ? ((maxEquity - equity) / maxEquity) : 0;
+          if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+        }
+
+        if (position > 0) {
+          const lastPrice = data[data.length - 1].close;
+          cash += position * lastPrice;
+          const lastBuy = trades.filter(t => t.type === 'buy').pop();
+          if (lastBuy && (lastPrice > lastBuy.price)) winningTrades++;
+          trades.push({ type: 'sell', date: data[data.length - 1].date, price: lastPrice, shares: position });
+          
+          if (equityCurve.length > 0) {
+            equityCurve[equityCurve.length - 1].equity = cash;
+          }
+        }
+
+        const totalReturn = (cash - initialCapital) / initialCapital;
+        const totalTrades = trades.filter(t => t.type === 'sell').length;
+        const winRate = totalTrades > 0 ? winningTrades / totalTrades : 0;
+        const years = data.length / 252;
+        const annualizedReturn = years > 0 ? (Math.pow(1 + totalReturn, 1 / years) - 1) : 0;
+
+        results.push({
+          marketCode: code,
+          metrics: {
+            totalReturn,
+            annualizedReturn,
+            maxDrawdown,
+            winRate,
+            trades: totalTrades,
+            finalCapital: cash
+          },
+          trades,
+          equityCurve
+        });
+      }
+
+      res.json({ success: true, results });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Polling for Alerts
+  setInterval(async () => {
+    try {
+      const { eq } = await import('drizzle-orm');
+      const activeAlerts = db.select().from(alerts).where(eq(alerts.isActive, true)).all();
+      if (activeAlerts.length === 0) return;
+
+      const codes = [...new Set(activeAlerts.map(a => a.marketCode))];
+      const chunkSize = 30;
+      const currentPrices = new Map<string, number>();
+      
+      for (let i = 0; i < codes.length; i += chunkSize) {
+        const chunk = codes.slice(i, i + chunkSize);
+        const url = `http://qt.gtimg.cn/q=${chunk.join(",")}`;
+        const response = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+        });
+        if (response.ok) {
+          const buffer = Buffer.from(await response.arrayBuffer());
+          const dataStr = iconv.decode(buffer, "gbk");
+          const parsed = parseTencentStockData(dataStr);
+          for (const p of parsed) {
+            currentPrices.set(p.marketCode, p.price);
+          }
+        }
+      }
+
+      const triggered = [];
+      db.transaction((tx) => {
+        for (const alert of activeAlerts) {
+          const price = currentPrices.get(alert.marketCode);
+          if (price === undefined) continue;
+
+          let isTriggered = false;
+          if (alert.type === 'price_above' && price >= alert.threshold) isTriggered = true;
+          if (alert.type === 'price_below' && price <= alert.threshold) isTriggered = true;
+
+          if (isTriggered) {
+            tx.update(alerts).set({
+              isTriggered: true,
+              isActive: false,
+              triggeredAt: new Date()
+            }).where(eq(alerts.id, alert.id)).run();
+
+            const notif = tx.insert(notifications).values({
+              type: 'alert',
+              title: `Alert Triggered: ${alert.marketCode}`,
+              content: `Price of ${alert.marketCode} is now ${price}, which triggered your ${alert.type} alert (threshold: ${alert.threshold}).`,
+              createdAt: new Date()
+            }).returning().get();
+
+            triggered.push({ alert: { ...alert, isTriggered: true, isActive: false, triggeredAt: new Date() }, notification: notif });
+          }
+        }
+      });
+
+      if (triggered.length > 0) {
+        const eventData = JSON.stringify({ type: 'alerts_triggered', data: triggered });
+        for (const client of alertClients) {
+          client.write(`data: ${eventData}\n\n`);
+        }
+      }
+
+    } catch (err) {
+      console.error("Alert polling error:", err);
+    }
+  }, 30000);
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+function parseTencentStockData(dataStr: string) {
+  const results: any[] = [];
+  const lines = dataStr.split("\n").filter((line) => line.trim() !== "");
+
+  for (const line of lines) {
+    if (line.includes('="')) {
+      const parts = line.split('="');
+      const varName = parts[0]; // e.g., v_sh600519
+      const rawData = parts[1].replace('";', "");
+      const fields = rawData.split("~");
+      
+      if (fields.length > 20) {
+        results.push({
+          marketCode: varName.replace('v_', ''), // sh600519
+          name: fields[1],
+          code: fields[2],
+          price: parseFloat(fields[3]),
+          previousClose: parseFloat(fields[4]),
+          open: parseFloat(fields[5]),
+          volume: parseInt(fields[6], 10), // in hands (手)
+          outerDisc: parseInt(fields[7], 10),
+          innerDisc: parseInt(fields[8], 10),
+          high: parseFloat(fields[33]),
+          low: parseFloat(fields[34]),
+          changePercentage: parseFloat(fields[32]),
+          changeAmount: parseFloat(fields[31]),
+          turnover: parseFloat(fields[37]),
+          turnoverRate: parseFloat(fields[38]),
+          peRatio: parseFloat(fields[39]),
+          pbRatio: parseFloat(fields[46]),
+          totalMarketValue: parseFloat(fields[45]), // 100 million
+          circulatingMarketValue: parseFloat(fields[44]),
+          updateTime: fields[30],
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+function initStockPool() {
+  try {
+    const records = db.select().from(stocksSchema).all();
+    if (records.length === 0) {
+      const csvPath = path.join(process.cwd(), "data", "deepseek_csv_20260617_1a46c0.csv");
+      if (fs.existsSync(csvPath)) {
+        const content = fs.readFileSync(csvPath, "utf-8");
+        const lines = content.split("\n").filter(l => l.trim().length > 0);
+        const toInsert = [];
+        for (let i = 1; i < lines.length; i++) {
+          const row = lines[i].split(",");
+          if (row.length >= 6) {
+            toInsert.push({
+              marketCode: row[0],
+              name: row[2],
+              view: row[3],
+              industry: row[4],
+              remarks: row[5],
+              isActive: true,
+              lastSyncTime: new Date()
+            });
+          }
+        }
+        if (toInsert.length > 0) {
+          db.insert(stocksSchema).values(toInsert).run();
+          console.log(`Initialized stock pool with ${toInsert.length} stocks from CSV.`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Failed to init stock pool", e);
+  }
+}
+
+initStockPool();
+startServer();

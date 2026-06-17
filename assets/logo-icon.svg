@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <!-- 噪点纹理 -->
+    <filter id="n" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.7" numOctaves="3" stitchTiles="stitch" result="n"/>
+      <feColorMatrix type="saturate" values="0" in="n" result="g"/>
+      <feComponentTransfer in="g" result="a">
+        <feFuncA type="linear" slope="0.07" intercept="0"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic" in2="a" mode="overlay"/>
+    </filter>
+
+    <!-- 脉冲发光 -->
+    <filter id="pg" x="-20%" y="-30%" width="140%" height="160%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b1"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- 星芒 -->
+    <filter id="sp" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="bb"/>
+      <feMerge>
+        <feMergeNode in="bb"/>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- 背景渐变 -->
+    <radialGradient id="bg" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#1a2030"/>
+      <stop offset="60%" stop-color="#0f1319"/>
+      <stop offset="100%" stop-color="#080a0e"/>
+    </radialGradient>
+
+    <!-- 金属边框渐变 -->
+    <linearGradient id="bdr" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffeaa0" stop-opacity="0.85"/>
+      <stop offset="30%" stop-color="#FCD535" stop-opacity="0.5"/>
+      <stop offset="60%" stop-color="#c49b1a" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#ffeaa0" stop-opacity="0.7"/>
+    </linearGradient>
+
+    <!-- 脉冲线渐变 -->
+    <linearGradient id="pm" x1="18" y1="64" x2="110" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#c49b1a"/>
+      <stop offset="25%" stop-color="#FCD535"/>
+      <stop offset="50%" stop-color="#fff1a8"/>
+      <stop offset="75%" stop-color="#FCD535"/>
+      <stop offset="100%" stop-color="#f0b90b"/>
+    </linearGradient>
+
+    <!-- 面积渐变 -->
+    <linearGradient id="af" x1="64" y1="35" x2="64" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FCD535" stop-opacity="0.18"/>
+      <stop offset="50%" stop-color="#FCD535" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#FCD535" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 玻璃高光 -->
+    <linearGradient id="gl" x1="20" y1="0" x2="100" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="30%" stop-color="#ffffff" stop-opacity="0.02"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 网格线渐变 -->
+    <linearGradient id="gf" x1="64" y1="20" x2="64" y2="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FCD535" stop-opacity="0"/>
+      <stop offset="30%" stop-color="#FCD535" stop-opacity="0.07"/>
+      <stop offset="70%" stop-color="#FCD535" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="#FCD535" stop-opacity="0"/>
+    </linearGradient>
+
+    <clipPath id="cc">
+      <rect width="128" height="128" rx="28" ry="28"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#cc)">
+    <!-- 深色基底 -->
+    <rect width="128" height="128" fill="url(#bg)"/>
+    <!-- 噪点 -->
+    <rect width="128" height="128" fill="url(#bg)" filter="url(#n)"/>
+
+    <!-- 网格 -->
+    <g>
+      <line x1="18" y1="42" x2="110" y2="42" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="18" y1="58" x2="110" y2="58" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="18" y1="74" x2="110" y2="74" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="18" y1="90" x2="110" y2="90" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="36" y1="25" x2="36" y2="105" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="55" y1="25" x2="55" y2="105" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="74" y1="25" x2="74" y2="105" stroke="url(#gf)" stroke-width="0.4"/>
+      <line x1="93" y1="25" x2="93" y2="105" stroke="url(#gf)" stroke-width="0.4"/>
+    </g>
+
+    <!-- K线柱（微弱） -->
+    <g opacity="0.10">
+      <rect x="28" y="68" width="3" height="22" rx="0.5" fill="#0ecb81"/>
+      <rect x="38" y="60" width="3" height="30" rx="0.5" fill="#0ecb81"/>
+      <rect x="48" y="72" width="3" height="18" rx="0.5" fill="#f6465d"/>
+      <rect x="58" y="56" width="3" height="34" rx="0.5" fill="#0ecb81"/>
+      <rect x="68" y="64" width="3" height="26" rx="0.5" fill="#f6465d"/>
+      <rect x="78" y="50" width="3" height="40" rx="0.5" fill="#0ecb81"/>
+      <rect x="88" y="58" width="3" height="32" rx="0.5" fill="#0ecb81"/>
+      <rect x="98" y="46" width="3" height="44" rx="0.5" fill="#0ecb81"/>
+    </g>
+
+    <!-- 面积填充 -->
+    <path
+      d="M20 84 L34 82 L46 78 L56 83 L66 68 L76 36 L86 90 L93 72 L100 64 L107 58 L112 50 L112 102 L20 102 Z"
+      fill="url(#af)"
+    />
+
+    <!-- 脉冲线：宽发光层 -->
+    <polyline
+      points="20,84 34,82 46,78 56,83 66,68 76,36 86,90 93,72 100,64 107,58 112,50"
+      stroke="#FCD535" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
+      fill="none" opacity="0.15" filter="url(#pg)"
+    />
+    <!-- 中间光晕 -->
+    <polyline
+      points="20,84 34,82 46,78 56,83 66,68 76,36 86,90 93,72 100,64 107,58 112,50"
+      stroke="#FCD535" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+      fill="none" opacity="0.4"
+    />
+    <!-- 主线 -->
+    <polyline
+      points="20,84 34,82 46,78 56,83 66,68 76,36 86,90 93,72 100,64 107,58 112,50"
+      stroke="url(#pm)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+      fill="none"
+    />
+    <!-- 高光细线 -->
+    <polyline
+      points="20,83.2 34,81.2 46,77.2 56,82.2 66,67.2 76,35.2 86,89.2 93,71.2 100,63.2 107,57.2 112,49.2"
+      stroke="#ffffff" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"
+      fill="none" opacity="0.2"
+    />
+
+    <!-- 尖峰星芒 -->
+    <g filter="url(#sp)">
+      <circle cx="76" cy="36" r="2.5" fill="#fff8d6" opacity="0.8"/>
+    </g>
+    <line x1="76" y1="28" x2="76" y2="44" stroke="#fff8d6" stroke-width="0.5" opacity="0.5"/>
+    <line x1="68" y1="36" x2="84" y2="36" stroke="#fff8d6" stroke-width="0.5" opacity="0.5"/>
+    <circle cx="76" cy="36" r="4" fill="none" stroke="#FCD535" stroke-width="0.8" opacity="0.5"/>
+    <circle cx="76" cy="36" r="1.8" fill="#FCD535"/>
+    <circle cx="76" cy="36" r="0.8" fill="#fff8d6"/>
+
+    <!-- 终点 -->
+    <circle cx="112" cy="50" r="3" fill="none" stroke="#FCD535" stroke-width="0.8" opacity="0.4"/>
+    <circle cx="112" cy="50" r="1.5" fill="#FCD535"/>
+    <circle cx="112" cy="50" r="0.6" fill="#fff8d6"/>
+
+    <!-- 玻璃反射 -->
+    <rect width="128" height="128" fill="url(#gl)" rx="28" ry="28"/>
+  </g>
+
+  <!-- 金属边框 -->
+  <rect x="1" y="1" width="126" height="126" rx="27" ry="27" fill="none" stroke="url(#bdr)" stroke-width="1.2"/>
+  <rect x="3" y="3" width="122" height="122" rx="25" ry="25" fill="none" stroke="#ffffff" stroke-width="0.3" stroke-opacity="0.06"/>
+</svg>

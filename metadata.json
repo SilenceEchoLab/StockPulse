@@ -1,0 +1,6 @@
+{
+  "name": "StockPulse — 股脉 · 智能投研平台",
+  "description": "AI-powered CSI 300 stock analysis platform featuring real-time quotes, intelligent stock screening, K-line charting, strategy backtesting, and smart alert system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

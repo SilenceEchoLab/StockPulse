@@ -1,0 +1,49 @@
+{
+  "name": "stockpulse",
+  "private": true,
+  "version": "1.0.0",
+  "description": "StockPulse — 股脉 · 智能投研平台 | AI-powered CSI 300 stock analysis platform with real-time quotes, smart picks, and backtesting",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "build": "vite build && esbuild server/index.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "archiver": "^8.0.0",
+    "better-sqlite3": "^12.11.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.45.2",
+    "express": "^4.22.2",
+    "iconv-lite": "^0.7.2",
+    "lightweight-charts": "^5.2.0",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "react-router-dom": "^7.18.0",
+    "recharts": "^3.8.1",
+    "tailwind-merge": "^3.6.0",
+    "technicalindicators": "^3.1.0",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^4.17.25",
+    "@types/iconv-lite": "^0.0.1",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  }
+}
