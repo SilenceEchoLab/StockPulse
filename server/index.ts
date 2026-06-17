@@ -5,9 +5,9 @@ import fsPromises from "fs/promises";
 import { createServer as createViteServer } from "vite";
 import { createRequire } from "module";
 import { db } from "./db/index.js";
-import { klineDaily, klineMin, stocks as stocksSchema, groups, stockGroupsLink, aiSentiment, alerts, notifications } from "./db/schema.js";
+import { klineDaily, klineMin, stocks as stocksSchema, groups, stockGroupsLink, aiSentiment, alerts, notifications, settings } from "./db/schema.js";
 import { MACD, RSI, BollingerBands, Stochastic } from "technicalindicators";
-import { ai } from "./ai/index.js";
+import { getAiClient, getAiModel, getAiPrompt } from "./ai/index.js";
 
 const require = createRequire(import.meta.url);
 const archiver = require("archiver");
@@ -107,7 +107,7 @@ async function runScraper(codes: string[]) {
           const klineKey = dataObj['qfqday'] ? 'qfqday' : 'day';
           const kData = dataObj[klineKey];
 
-          if (kData && Array.isArray(kData)) {
+          if (kData && Array.isArray(kData) && kData.length > 0) {
             // Write to CSV
             const csvRows = ["date,open,close,high,low,volume"];
             for (const row of kData) {
@@ -219,7 +219,7 @@ async function runScraper(codes: string[]) {
             const minUrl = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},${period},,,2000`;
             const minData = await fetchWithRetry(minUrl);
             if (minData) {
-               if (minData.code === 0 && minData.data[code] && minData.data[code][period]) {
+               if (minData.code === 0 && minData.data[code] && Array.isArray(minData.data[code][period]) && minData.data[code][period].length > 0) {
                   const mData = minData.data[code][period];
                   const mRecords = mData.map((row: any[]) => ({
                      marketCode: code,
@@ -726,29 +726,31 @@ async function startServer() {
         `Date: ${d.date}, Close: ${d.close}, Vol: ${d.volume}, MACD: ${d.macd}, RSI: ${d.rsi14}`
       ).join('\n');
 
-      const prompt = `You are a financial analyst expert. Analyze the following 60-day stock data and output pure JSON.
+      let responseText = "{}";
+      try {
+        const aiClient = await getAiClient();
+        const aiModel = await getAiModel();
+        const customPrompt = await getAiPrompt('ai_sentiment_prompt', `You are a financial analyst expert. Analyze the following 60-day stock data and output pure JSON.
 The JSON must strictly match this format: { "score": number, "label": "string", "summary": "string", "signals": [{ "type": "bullish" | "bearish", "name": "string", "confidence": number }] }.
 Score is from 0 to 100.
-Do not include markdown tags like \`\`\`json. Only the pure JSON object.
-
-Data:
-${dataContext}`;
-
-      let responseText = "{}";
-      if (!process.env.GEMINI_API_KEY) {
-         responseText = JSON.stringify({
-            score: 75,
-            label: "Neutral",
-            summary: "Mocked sentiment since GEMINI_API_KEY is not set.",
-            signals: []
-         });
-      } else {
-        const aiResponse = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: prompt,
+Do not include markdown tags like \`\`\`json. Only the pure JSON object.`);
+        
+        const response = await aiClient.chat.completions.create({
+           model: aiModel,
+           response_format: { type: "json_object" },
+           messages: [
+              { role: "system", content: customPrompt },
+              { role: "user", content: `Data:\n${dataContext}` }
+           ]
         });
-        responseText = aiResponse.text || "{}";
-        responseText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
+
+        responseText = response.choices[0]?.message?.content || "{}";
+      } catch (err: any) {
+        // Fallback or bubble up
+        if (err.message.includes('API Key is not configured')) {
+           return res.status(400).json({ success: false, error: "AI_NOT_CONFIGURED", message: "Please configure your AI Provider in Settings." });
+        }
+        throw err;
       }
       
       const parsed = JSON.parse(responseText);
@@ -827,6 +829,41 @@ ${dataContext}`;
 
     } catch (e: any) {
       console.error("AI Picks Error:", e);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Settings API
+  app.get("/api/settings", async (req, res) => {
+    try {
+      const records = db.select().from(settings).all();
+      const data: Record<string, string> = {};
+      for (const r of records) {
+        data[r.key] = r.value;
+      }
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post("/api/settings", async (req, res) => {
+    try {
+      const payload = req.body; // key-value pairs
+      db.transaction((tx) => {
+        for (const [key, value] of Object.entries(payload)) {
+          if (value === null || value === undefined || value === '') {
+             tx.delete(settings).where(eq(settings.key, key)).run();
+          } else {
+             tx.insert(settings)
+               .values({ key, value: String(value) })
+               .onConflictDoUpdate({ target: settings.key, set: { value: String(value) } })
+               .run();
+          }
+        }
+      });
+      res.json({ success: true });
+    } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
     }
   });

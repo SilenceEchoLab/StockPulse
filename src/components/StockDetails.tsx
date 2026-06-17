@@ -3,6 +3,7 @@ import { Plus, Bell, Minus } from "lucide-react";
 import { StockData } from "../types";
 import { KLineChart } from "./KLineChart";
 import { Button } from "./ui/Button";
+import { useNavigate } from "react-router-dom";
 
 interface KlineData {
   date: string;
@@ -33,15 +34,24 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
 
   const [aiSentiment, setAiSentiment] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState<boolean>(true);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchAi = async () => {
       try {
         setAiLoading(true);
+        setAiError(null);
         const res = await fetch(`/api/ai/sentiment/${stock.marketCode}`);
-        if (res.ok) {
-          const json = await res.json();
+        const json = await res.json();
+        if (res.ok && json.success) {
           setAiSentiment(json.data);
+        } else {
+          if (json.error === 'AI_NOT_CONFIGURED') {
+            setAiError('AI_NOT_CONFIGURED');
+          } else {
+            console.error(json.error);
+          }
         }
       } catch (e) {
         console.error(e);
@@ -303,6 +313,13 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
                <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col items-center justify-center min-h-[140px]">
                   <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin mb-2"></div>
                   <span className="text-[12px] text-muted">AI 深度分析中...</span>
+               </div>
+             ) : aiError === 'AI_NOT_CONFIGURED' ? (
+               <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col items-center justify-center py-6">
+                 <div className="text-[13px] text-muted mb-3">暂无 AI 提供商配置</div>
+                 <Button onClick={() => navigate('/settings')} variant="secondary-on-dark" className="px-4 py-1.5 border border-primary text-primary rounded text-[12px] hover:bg-primary/10 transition-colors">
+                   ⚙️ 前往设置配置 AI
+                 </Button>
                </div>
              ) : aiSentiment ? (
                <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col">

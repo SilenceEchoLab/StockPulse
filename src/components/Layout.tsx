@@ -104,6 +104,12 @@ export default function Layout() {
       items: [
         { name: "数据控制台", path: "/", icon: Database },
       ]
+    },
+    {
+      title: "系统配置",
+      items: [
+        { name: "⚙️ AI 设置", path: "/settings", icon: Settings },
+      ]
     }
   ];
 
@@ -112,6 +118,7 @@ export default function Layout() {
     '/pool': '我的自选',
     '/ai-picks': 'AI选股',
     '/backtest': '策略回测',
+    '/settings': '⚙️ AI 设置',
   };
 
   const currentTitle = breadcrumbMap[location.pathname] || (location.pathname.startsWith('/pool/') ? '个股详情' : '');

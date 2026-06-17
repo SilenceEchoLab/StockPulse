@@ -134,16 +134,29 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
       
       let crosshairSyncing = false;
       chart.subscribeCrosshairMove((param) => {
-        if (!crosshairSyncing && param.point && param.time) {
+        if (!crosshairSyncing) {
           crosshairSyncing = true;
-          indicatorChart.setCrosshairPosition(param.point.x, param.point.y, indicatorChart.addSeries(HistogramSeries, {})); // Dummy series to force position
+          if (param.point && param.time && indSeriesRef.current[0]) {
+            const series = indSeriesRef.current[0];
+            const dataPoint = param.seriesData.get(seriesRef.current.candleSeries as any);
+            const price = dataPoint ? (dataPoint as any).close || (dataPoint as any).value || 0 : 0;
+            indicatorChart.setCrosshairPosition(price, param.time, series);
+          } else {
+            indicatorChart.clearCrosshairPosition();
+          }
           crosshairSyncing = false;
         }
       });
       indicatorChart.subscribeCrosshairMove((param) => {
-        if (!crosshairSyncing && param.point && param.time) {
+        if (!crosshairSyncing) {
           crosshairSyncing = true;
-          chart.setCrosshairPosition(param.point.x, param.point.y, candleSeries);
+          if (param.point && param.time && seriesRef.current.candleSeries) {
+            const dataPoint = param.seriesData.get(indSeriesRef.current[0] as any);
+            const price = dataPoint ? (dataPoint as any).value || 0 : 0;
+            chart.setCrosshairPosition(price, param.time, seriesRef.current.candleSeries);
+          } else {
+            chart.clearCrosshairPosition();
+          }
           crosshairSyncing = false;
         }
       });

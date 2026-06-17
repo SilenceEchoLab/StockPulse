@@ -88,3 +88,8 @@ export const notifications = sqliteTable('notifications', {
   isRead: integer('is_read', { mode: 'boolean' }).default(false),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const settings = sqliteTable('settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+});

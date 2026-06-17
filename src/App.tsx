@@ -5,6 +5,7 @@ import StockPool from "./pages/StockPool";
 import StockDetail from "./pages/StockDetail";
 import AiPicks from "./pages/AiPicks";
 import Backtest from "./pages/Backtest";
+import Settings from "./pages/Settings";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="pool/:code" element={<StockDetail />} />
           <Route path="ai-picks" element={<AiPicks />} />
           <Route path="backtest" element={<Backtest />} />
+          <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
