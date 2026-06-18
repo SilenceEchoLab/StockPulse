@@ -1,10 +1,10 @@
 import OpenAI from 'openai';
-import { db } from '../db/index.js';
+import { getDb } from '../db/getDb.js';
 import { settings } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
-export async function getAiClient() {
-  const dbSettings = db.select().from(settings).all();
+export async function getAiClient(c?: any) {
+  const dbSettings = await getDb(c).select().from(settings).all();
   const config: Record<string, string> = {};
   for (const s of dbSettings) {
     config[s.key] = s.value;
@@ -23,12 +23,12 @@ export async function getAiClient() {
   });
 }
 
-export async function getAiModel() {
-  const modelSetting = db.select().from(settings).where(eq(settings.key, 'ai_model')).get();
+export async function getAiModel(c?: any) {
+  const modelSetting = await getDb(c).select().from(settings).where(eq(settings.key, 'ai_model')).get();
   return modelSetting?.value || 'gpt-4o-mini';
 }
 
-export async function getAiPrompt(key: string, defaultPrompt: string) {
-  const promptSetting = db.select().from(settings).where(eq(settings.key, key)).get();
+export async function getAiPrompt(key: string, defaultPrompt: string, c?: any) {
+  const promptSetting = await getDb(c).select().from(settings).where(eq(settings.key, key)).get();
   return promptSetting?.value || defaultPrompt;
 }

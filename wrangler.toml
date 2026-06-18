@@ -1,0 +1,19 @@
+name = "stockpulse"
+main = "server/index.ts"
+compatibility_date = "2024-04-05"
+compatibility_flags = ["nodejs_compat"]
+
+# 托管构建好的前端静态资源 (Vite output)
+[assets]
+directory = "dist"
+binding = "ASSETS"
+
+# 绑定 D1 Serverless 数据库
+[[d1_databases]]
+binding = "stockpulse_db"
+database_name = "stockpulse-db"
+database_id = "5780bade-cfa7-4dda-8b45-6d731d835c20"
+
+# 定时任务 (Cron Triggers): 每分钟执行一次股票报警和预警池同步
+[triggers]
+crons = ["* * * * *"]
