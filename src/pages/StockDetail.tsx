@@ -1,37 +1,31 @@
-import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import useSWR from "swr";
 import { StockData } from "../types";
 import StockDetails from "../components/StockDetails";
 import { Activity, ArrowLeft } from "lucide-react";
 
+const fetcher = (url: string) => fetch(url).then((res) => {
+  if (!res.ok) throw new Error("Failed to fetch");
+  return res.json();
+});
+
 export default function StockDetail() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
-  const [stock, setStock] = useState<StockData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const fetchStock = async () => {
-      if (!code) return;
-      try {
-        setLoading(true);
-        const res = await fetch(`/api/stocks?codes=${code}`);
-        if (!res.ok) throw new Error("Failed to fetch stock real-time data");
-        const json = await res.json();
-        if (json.success && json.data && json.data.length > 0) {
-          setStock(json.data[0]);
-        } else {
-          setError("Stock not found or invalid format");
-        }
-      } catch (err: any) {
-        setError(err.message || "Failed to load stock data");
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchStock();
-  }, [code]);
+  const { data: stockRes, error: swrError, isLoading: swrLoading } = useSWR(
+    code ? `/api/stocks?codes=${code}` : null,
+    fetcher,
+    {
+      refreshInterval: 15000,
+      dedupingInterval: 5000,
+      revalidateOnFocus: true,
+    }
+  );
+
+  const stock: StockData | null = stockRes?.data?.[0] || null;
+  const loading = swrLoading;
+  const error = swrError?.message || (!stock && !loading ? "Stock not found" : null);
 
   if (loading) {
     return (

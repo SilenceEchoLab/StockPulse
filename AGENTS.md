@@ -1,10 +1,36 @@
 
-面对前端应用，优先使用agent-browser/playwright mcp等工具来完成页面的访问与点击操作等实地体验，模仿人类进行操作截图查看现状；
+# Repository Guidelines
 
-制定（代码改造-实地验证-采集日志分析问题-修复问题-实地验证修复结果-下一轮验证）这样的闭环工作机制，以保证初始需求得以高质量达成；
+## Project Structure & Module Organization
 
-严格的编码习惯要求，有合理的中文注释；
+StockPulse is a Vite + React 19 TypeScript app with an Express backend. Frontend code lives in `src/`: page views in `src/pages`, shared UI in `src/components`, utilities in `src/lib`, and shared types in `src/types.ts`. Backend code lives in `server/`, including Drizzle schema and database setup in `server/db` and AI provider code in `server/ai`. Static brand and screenshot assets are under `assets/`; design notes are under `docs/`.
 
-对中间产物执行严格的归集和及时清理，不允许零散地放置项目中；
+## Build, Test, and Development Commands
 
-有成熟的第三方方案则评估后引用，不重复造轮子；
+Use pnpm because this repo includes `pnpm-lock.yaml`.
+
+- `pnpm install`: install dependencies.
+- `pnpm dev`: run the Express server and Vite development app through `tsx server/index.ts`.
+- `pnpm lint`: run TypeScript validation with `tsc --noEmit`.
+- `pnpm build`: build the Vite frontend and bundle `server/index.ts` to `dist/server.cjs`.
+- `pnpm start`: run the production server bundle.
+
+## Coding Style & Naming Conventions
+
+Write TypeScript and React function components. Match existing formatting: two-space indentation, single quotes, semicolons, and compact imports such as `import {defineConfig} from 'vite';`. Name React components and page files in PascalCase (`StockDetail.tsx`), hooks and helpers in camelCase, and constants in uppercase where appropriate. Use the `@/*` alias for root-relative imports when it improves clarity. Add concise Chinese comments for non-obvious domain or workflow logic.
+
+## Testing & Verification Guidelines
+
+There is no dedicated unit test runner configured yet, so `pnpm lint` is the required fast validator. For behavior or UI changes, also run `pnpm build` and validate in a browser with agent-browser or Playwright-style tooling: interact with the app, capture screenshots, inspect console/network logs, fix issues, then re-verify.
+
+## Commit & Pull Request Guidelines
+
+Recent commits use concise conventional prefixes such as `feat:` and `chore:`. Keep commit messages imperative and scoped, for example `feat: add settings page validation`. Pull requests should include a short summary, linked issue when available, validation commands run, and screenshots or screen recordings for UI changes.
+
+## Security & Configuration Tips
+
+Copy `.env.example` for local configuration and never commit real secrets, API keys, generated databases, logs, or build outputs. Prefer mature existing dependencies already in `package.json`; evaluate before adding new packages. Keep temporary artifacts organized and remove them before finishing work.
+
+## Agent-Specific Workflow
+
+For frontend work, prefer real browser interaction over static inspection. Follow a closed loop: code change, field validation, log review, fix, and re-validation. Do not scatter intermediate artifacts across the repository.

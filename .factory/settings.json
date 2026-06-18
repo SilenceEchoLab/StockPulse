@@ -1,0 +1,49 @@
+{
+  "logoAnimation": "off",
+  "customModels": [
+    {
+      "model": "mimo-v2.5-pro",
+      "id": "custom:mimo-v2.5-pro-0",
+      "index": 3,
+      "baseUrl": "https://token-plan-cn.xiaomimimo.com/anthropic",
+      "apiKey": "tp-cjdk9k29017iopmnms3snogbujp6ruggmmhccigg6i5eeug8",
+      "displayName": "mimo-v2.5-pro",
+      "noImageSupport": false,
+      "provider": "anthropic"
+    },
+    {
+      "model": "glm-5.1[1m]",
+      "id": "custom:zai:glm-5.1[1m]-0",
+      "index": 9,
+      "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "apiKey": "59d7243f6d8449e694105141ea0b8b01.37kggg6h3YI8cyTf",
+      "displayName": "zai:glm-5.1[1m]",
+      "noImageSupport": true,
+      "provider": "generic-chat-completion-api"
+    },
+    {
+      "model": "gpt-5.5",
+      "id": "custom:gpt-5.5-0",
+      "index": 10,
+      "baseUrl": "https://muyuan.do/v1",
+      "apiKey": "sk-Ri1CfSSQuOXAbjwTjdDX129u7vTw5kdVbaTEd585fXrFBG55",
+      "displayName": "muyuan:gpt-5.5",
+      "noImageSupport": true,
+      "provider": "openai"
+    }
+  ],
+  "sessionDefaultSettings": {
+    "model": "custom:gpt-5.5-0",
+    "autonomyMode": "auto-high",
+    "reasoningEffort": "high",
+    "interactionMode": "auto",
+    "autonomyLevel": "high"
+  },
+  "allowBackgroundProcesses": true,
+  "ideExtensionPromptedAt": {
+    "vscode": 1772432433102
+  },
+  "hasSeenMissionOnboarding": true,
+  "todoDisplayMode": "inline",
+  "locale": "zh-CN"
+}

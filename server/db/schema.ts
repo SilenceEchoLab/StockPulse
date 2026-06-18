@@ -1,4 +1,4 @@
-import { sqliteTable, text, real, primaryKey, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, real, primaryKey, integer, index } from 'drizzle-orm/sqlite-core';
 
 export const stocks = sqliteTable('stocks', {
   marketCode: text('market_code').primaryKey(),
@@ -9,6 +9,19 @@ export const stocks = sqliteTable('stocks', {
   isActive: integer('is_active', { mode: 'boolean' }).default(true),
   lastSyncTime: integer('last_sync_time', { mode: 'timestamp' }),
 });
+
+export const dailySnapshot = sqliteTable('daily_snapshot', {
+  marketCode: text('market_code').notNull(),
+  date: text('date').notNull(), // YYYY-MM-DD
+  peRatio: real('pe_ratio'),
+  pbRatio: real('pb_ratio'),
+  turnoverRate: real('turnover_rate'),
+  totalMarketValue: real('total_market_value'),
+  circulatingMarketValue: real('circulating_market_value'),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.marketCode, table.date] })
+}));
 
 export const klineDaily = sqliteTable('kline_daily', {
   marketCode: text('market_code').notNull(),
@@ -53,15 +66,14 @@ export const groups = sqliteTable('groups', {
 });
 
 export const stockGroupsLink = sqliteTable('stock_groups_link', {
-  stockCode: text('stock_code').notNull(),
+  marketCode: text('market_code').notNull(),
   groupId: integer('group_id').notNull(),
 }, (table) => ({
-  pk: primaryKey({ columns: [table.stockCode, table.groupId] })
+  pk: primaryKey({ columns: [table.marketCode, table.groupId] })
 }));
 
 export const aiSentiment = sqliteTable('ai_sentiment', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  marketCode: text('market_code').notNull(),
+  marketCode: text('market_code').primaryKey(),
   score: real('score').notNull(),
   label: text('label').notNull(),
   summary: text('summary').notNull(),
@@ -78,7 +90,10 @@ export const alerts = sqliteTable('alerts', {
   isActive: integer('is_active', { mode: 'boolean' }).default(true),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   triggeredAt: integer('triggered_at', { mode: 'timestamp' }),
-});
+}, (table) => ({
+  marketCodeIdx: index('alerts_market_code_idx').on(table.marketCode),
+  isActiveIdx: index('alerts_is_active_idx').on(table.isActive)
+}));
 
 export const notifications = sqliteTable('notifications', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -93,3 +108,4 @@ export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
 });
+

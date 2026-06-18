@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Activity, Play, Settings2, BarChart2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
-import { createChart, IChartApi, LineStyle } from 'lightweight-charts';
+import { createChart, IChartApi, LineSeries, LineStyle } from 'lightweight-charts';
 
 export default function Backtest() {
   const [running, setRunning] = useState(false);
@@ -34,7 +34,16 @@ export default function Backtest() {
       });
       if (res.ok) {
         const json = await res.json();
-        setResult(json.data);
+        if (json.results && json.results.length > 0) {
+          const firstResult = json.results[0];
+          setResult({
+            ...firstResult.metrics,
+            trades: firstResult.trades,
+            equityCurve: firstResult.equityCurve
+          });
+        } else {
+          setResult(null);
+        }
       } else {
         alert("回测请求失败");
       }
@@ -71,7 +80,7 @@ export default function Backtest() {
       autoSize: true,
     });
 
-    const equitySeries = chart.addLineSeries({
+    const equitySeries = chart.addSeries(LineSeries, {
       color: '#f23645',
       lineWidth: 2,
     });
@@ -192,7 +201,7 @@ export default function Backtest() {
           )}
           {result && !running && (
             <div className="flex flex-col h-full">
-              <div className="grid grid-cols-4 gap-4 mb-6 shrink-0">
+               <div className="grid grid-cols-5 gap-4 mb-6 shrink-0">
                  <div className="bg-canvas-dark border border-hairline-dark rounded p-4">
                     <div className="text-[12px] text-muted mb-1">总收益率</div>
                     <div className={`text-[20px] font-mono font-bold ${result.totalReturn >= 0 ? 'text-trading-up' : 'text-trading-down'}`}>
@@ -203,6 +212,12 @@ export default function Backtest() {
                     <div className="text-[12px] text-muted mb-1">年化收益</div>
                     <div className={`text-[20px] font-mono font-bold ${result.annualizedReturn >= 0 ? 'text-trading-up' : 'text-trading-down'}`}>
                       {(result.annualizedReturn * 100).toFixed(2)}%
+                    </div>
+                 </div>
+                 <div className="bg-canvas-dark border border-hairline-dark rounded p-4">
+                    <div className="text-[12px] text-muted mb-1">夏普比率</div>
+                    <div className={`text-[20px] font-mono font-bold ${result.sharpeRatio >= 1 ? 'text-trading-up' : 'text-body-dark'}`}>
+                      {result.sharpeRatio ? result.sharpeRatio.toFixed(2) : '0.00'}
                     </div>
                  </div>
                  <div className="bg-canvas-dark border border-hairline-dark rounded p-4">

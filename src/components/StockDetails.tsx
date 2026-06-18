@@ -1,9 +1,15 @@
 import { useState, useEffect } from "react";
 import { Plus, Bell, Minus } from "lucide-react";
+import useSWR from "swr";
 import { StockData } from "../types";
 import { KLineChart } from "./KLineChart";
 import { Button } from "./ui/Button";
 import { useNavigate } from "react-router-dom";
+
+const fetcher = (url: string) => fetch(url).then((res) => {
+  if (!res.ok) throw new Error("Failed to fetch");
+  return res.json();
+});
 
 interface KlineData {
   date: string;
@@ -25,9 +31,6 @@ interface KlineData {
 }
 
 export default function StockDetails({ stock, onBack }: { stock: StockData; onBack: () => void }) {
-  const [klineData, setKlineData] = useState<KlineData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [period, setPeriod] = useState<string>('day');
   const [activeIndicator, setActiveIndicator] = useState<'MACD' | 'KDJ' | 'RSI'>('MACD');
   const [inPool, setInPool] = useState<boolean>(false);
@@ -96,33 +99,19 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
     }
   };
 
-  useEffect(() => {
-    const fetchKlineData = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch(`/api/kline/${stock.marketCode}?period=${period}`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch historical data.");
-        }
-        const result = await response.json();
-        if (result.success) {
-          setKlineData(result.data);
-        } else {
-          throw new Error(result.error || "Failed to fetch historical data.");
-        }
-      } catch (e: any) {
-        console.error("Kline fetch error:", e);
-        if (e.name === 'TypeError' && e.message === 'Failed to fetch') {
-          setError("网络错误: 无法连接服务器。");
-        } else {
-          setError(e.message || "发生未知错误。");
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchKlineData();
-  }, [stock.marketCode, period]);
+  // 使用 SWR 缓存 K 线数据，避免切换周期时重复请求
+  const { data: klineRes, error: klineSwrError, isLoading: klineLoading } = useSWR(
+    `/api/kline/${stock.marketCode}?period=${period}`,
+    fetcher,
+    {
+      dedupingInterval: 60000, // K线数据1分钟内不再重复请求
+      revalidateOnFocus: false // 切换回页面不需要立刻刷新长周期K线
+    }
+  );
+
+  const klineData: KlineData[] = klineRes?.data || [];
+  const loading = klineLoading;
+  const error = klineSwrError?.message || (klineRes && !klineRes.success ? klineRes.error : null);
 
   const getFormatForChange = (val: number) => {
     if (val > 0) return "text-trading-up"; // trading-up is green, Wait, standard market: red is up in China. But I'll stick to original Binance logic where green is up. Wait, original used #f23645 (red) for > 0 and #1bb154 (green) for < 0 because it's a Chinese stock tracker!
@@ -224,6 +213,22 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
           <div className="flex flex-col justify-between">
             <span className="text-muted mb-1">总市值</span>
             <span className="text-white">{stock.totalMarketValue ? stock.totalMarketValue.toFixed(2) : '-'}亿</span>
+          </div>
+          <div className="flex flex-col justify-between">
+            <span className="text-muted mb-1">换手率</span>
+            <span className="text-white">{stock.turnoverRate ? stock.turnoverRate.toFixed(2) : '-'}%</span>
+          </div>
+          <div className="flex flex-col justify-between">
+            <span className="text-muted mb-1">PE(动)</span>
+            <span className="text-white">{stock.peRatio ? stock.peRatio.toFixed(2) : '-'}</span>
+          </div>
+          <div className="flex flex-col justify-between">
+            <span className="text-muted mb-1">PB</span>
+            <span className="text-white">{stock.pbRatio ? stock.pbRatio.toFixed(2) : '-'}</span>
+          </div>
+          <div className="flex flex-col justify-between">
+            <span className="text-muted mb-1"></span>
+            <span className="text-white"></span>
           </div>
         </div>
         
@@ -331,8 +336,8 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
                       <span className="text-[11px] text-muted mt-1">综合评分 (0-100)</span>
                     </div>
                     <div className={`px-3 py-1.5 rounded-md text-[13px] font-medium ${
-                      aiSentiment.label === '积极' ? 'bg-trading-up/10 text-trading-up' : 
-                      aiSentiment.label === '消极' ? 'bg-trading-down/10 text-trading-down' : 'bg-surface-elevated-dark text-info'
+                      aiSentiment.score >= 60 ? 'bg-trading-up/10 text-trading-up' : 
+                      aiSentiment.score <= 40 ? 'bg-trading-down/10 text-trading-down' : 'bg-surface-elevated-dark text-info'
                     }`}>
                       {aiSentiment.label}
                     </div>

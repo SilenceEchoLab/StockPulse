@@ -1,10 +1,17 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, type ChangeEvent, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Trash2, Download, Activity, Star, Upload, FolderPlus } from "lucide-react";
+import useSWR from "swr";
 import { StockData } from "../types";
 import { exportToCSV } from "../lib/exportUtils";
 import { cn } from "../lib/utils";
 import { Button } from "../components/ui/Button";
+
+// 全局 Fetcher
+const fetcher = (url: string) => fetch(url).then((res) => {
+  if (!res.ok) throw new Error("Failed to fetch");
+  return res.json();
+});
 
 export default function StockPool() {
   const navigate = useNavigate();
@@ -12,10 +19,8 @@ export default function StockPool() {
   const [groups, setGroups] = useState<any[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<number | 'all'>('all');
   const [newCodeInput, setNewCodeInput] = useState("");
-  const [stocks, setStocks] = useState<StockData[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -30,14 +35,12 @@ export default function StockPool() {
 
   const fetchPool = useCallback(async () => {
     try {
-      // First fetch groups
       const gRes = await fetch('/api/groups');
       if (gRes.ok) {
         const gJson = await gRes.json();
         setGroups(gJson.data || []);
       }
       
-      // Then fetch pool depending on group
       const url = activeGroupId === 'all' ? '/api/pool' : `/api/groups/${activeGroupId}`;
       const response = await fetch(url);
       if (response.ok) {
@@ -45,10 +48,6 @@ export default function StockPool() {
         if (activeGroupId === 'all') {
           setPoolCodes(json.data.map((s: any) => s.marketCode));
         } else {
-          // Assuming /api/groups/:id returns stocks in the group
-          // Actually backend only has /api/groups which returns groups, 
-          // but we can filter or just fetch all pool and filter by group frontend if backend lacks it,
-          // Let's assume we fetch all pool for now
           setPoolCodes(json.data.map((s: any) => s.marketCode || s.stockCode));
         }
       }
@@ -57,57 +56,25 @@ export default function StockPool() {
     }
   }, [activeGroupId]);
 
-  const fetchStocks = useCallback(async () => {
-    if (poolCodes.length === 0) {
-      setStocks([]);
-      setLoading(false);
-      return;
-    }
-    try {
-      setLoading(true);
-      setError(null);
-      const codesQuery = poolCodes.join(",");
-      const response = await fetch(`/api/stocks?codes=${codesQuery}`);
-      
-      if (!response.ok) {
-        throw new Error("Failed to fetch data from server");
-      }
-
-      const json = await response.json();
-      if (json.success && Array.isArray(json.data)) {
-        setStocks(json.data);
-      } else {
-        throw new Error("Invalid format received from server");
-      }
-    } catch (err: any) {
-      console.error("Fetch error details:", err);
-      if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
-        setError("Network error: Cannot connect to the server.");
-      } else {
-        setError(err.message || "An error occurred while communicating with the server.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [poolCodes]);
-
   useEffect(() => {
     fetchPool();
   }, [fetchPool]);
 
-  useEffect(() => {
-    fetchStocks();
-  }, [fetchStocks]);
-
-  useEffect(() => {
-    let intervalId: NodeJS.Timeout;
-    if (isAutoRefresh) {
-      intervalId = setInterval(() => {
-        fetchStocks();
-      }, 15000);
+  // Use SWR for fetching real-time market quotes
+  const codesQuery = poolCodes.join(",");
+  const { data: stockRes, error: swrError, isLoading: swrLoading } = useSWR(
+    codesQuery ? `/api/stocks?codes=${codesQuery}` : null,
+    fetcher,
+    {
+      refreshInterval: isAutoRefresh ? 15000 : 0, // Auto refresh every 15s
+      dedupingInterval: 5000,                     // Deduplicate identical requests within 5s
+      revalidateOnFocus: true,                    // Revalidate when window gets focus
     }
-    return () => clearInterval(intervalId);
-  }, [isAutoRefresh, fetchStocks]);
+  );
+
+  const stocks: StockData[] = stockRes?.data || [];
+  const loading = swrLoading;
+  const error = swrError?.message || null;
 
   const handleExport = () => {
     if (filteredStocks.length > 0) {
@@ -116,7 +83,7 @@ export default function StockPool() {
     }
   };
 
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     
@@ -130,12 +97,13 @@ export default function StockPool() {
         body: text
       });
       if (res.ok) {
+        setImportError(null);
         fetchPool();
       } else {
-        setError("导入失败，后端可能尚未实现完整的导入接口");
+        setImportError("导入失败，后端可能尚未实现完整的导入接口");
       }
     } catch (err) {
-      setError("读取文件失败");
+      setImportError("读取文件失败");
     } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -164,7 +132,7 @@ export default function StockPool() {
     }
   };
 
-  const addToPool = async (e: React.FormEvent) => {
+  const addToPool = async (e: FormEvent) => {
     e.preventDefault();
     if (!newCodeInput) return;
     try {
@@ -351,9 +319,9 @@ export default function StockPool() {
                 <th className="px-5 py-3 text-[12px] font-normal text-muted whitespace-nowrap">名称</th>
                 <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">最新价</th>
                 <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">涨跌幅</th>
-                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">涨跌额</th>
-                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">成交量</th>
-                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">成交额</th>
+                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">换手率</th>
+                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">PE(动)</th>
+                <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">PB</th>
                 <th className="px-5 py-3 text-right text-[12px] font-normal text-muted whitespace-nowrap">总市值</th>
                 <th className="px-5 py-3 text-left text-[12px] font-normal text-muted whitespace-nowrap">行业</th>
                 <th className="px-5 py-3 text-left text-[12px] font-normal text-muted whitespace-nowrap">资金观点/短评</th>
@@ -384,15 +352,13 @@ export default function StockPool() {
                     </div>
                   </td>
                   <td className="px-5 py-2.5 whitespace-nowrap text-right">
-                    <div className={cn("text-[13px] font-mono", getFormatForChange(stock.changePercentage))}>
-                      {stock.changeAmount > 0 ? '+' : ''}{stock.changeAmount.toFixed(2)}
-                    </div>
+                    <div className="text-[13px] text-body-dark font-mono">{stock.turnoverRate ? stock.turnoverRate.toFixed(2) : '-'}%</div>
                   </td>
                   <td className="px-5 py-2.5 whitespace-nowrap text-right">
-                    <div className="text-[13px] text-body-dark font-mono">{(stock.volume / 10000).toFixed(2)}万</div>
+                    <div className="text-[13px] text-body-dark font-mono">{stock.peRatio ? stock.peRatio.toFixed(2) : '-'}</div>
                   </td>
                   <td className="px-5 py-2.5 whitespace-nowrap text-right">
-                    <div className="text-[13px] text-body-dark font-mono">{(stock.turnover / 100000000).toFixed(2)}亿</div>
+                    <div className="text-[13px] text-body-dark font-mono">{stock.pbRatio ? stock.pbRatio.toFixed(2) : '-'}</div>
                   </td>
                   <td className="px-5 py-2.5 whitespace-nowrap text-right">
                     <div className="text-[13px] text-body-dark font-mono">{stock.totalMarketValue ? stock.totalMarketValue.toFixed(2) : '-'}亿</div>

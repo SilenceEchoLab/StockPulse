@@ -80,6 +80,8 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: '', // set as an overlay
+    });
+    volumeSeries.priceScale().applyOptions({
       scaleMargins: {
         top: 0.8,
         bottom: 0,
