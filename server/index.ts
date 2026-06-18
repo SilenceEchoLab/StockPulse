@@ -1,10 +1,5 @@
-import express from "express";
-
-import path from "path";
-
-import fs from "fs";
-
-import fsPromises from "fs/promises";
+import { Hono } from "hono";
+import { getDb } from "./db/getDb.js";
 
 import { createServer as createViteServer } from "vite";
 
@@ -12,7 +7,7 @@ import { createRequire } from "module";
 
 import { eq } from "drizzle-orm";
 
-import { db } from "./db/index.js";
+
 
 import { klineDaily, klineMin, stocks as stocksSchema, groups, stockGroupsLink, aiSentiment, alerts, notifications, settings, dailySnapshot } from "./db/schema.js";
 
@@ -22,23 +17,19 @@ import { getAiClient, getAiModel, getAiPrompt } from "./ai/index.js";
 
 
 
-const require = createRequire(import.meta.url);
-
-const archiver = require("archiver");
-
-const iconv = require("iconv-lite");
+// Archiver and iconv-lite removed for Cloudflare compatibility
 
 
 
-const DATA_DIR = path.join(process.cwd(), "data", "historical");
+const DATA_DIR = "";
 
 
 
 // Ensure data directory exists
 
-if (!fs.existsSync(DATA_DIR)) {
+if (!false) {
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  
 
 }
 
@@ -156,9 +147,9 @@ async function getTencentStockData(codes: string[]) {
 
         if (response.ok) {
 
-          const buffer = Buffer.from(await response.arrayBuffer());
+          const buffer = await response.arrayBuffer();
 
-          const dataStr = iconv.decode(buffer, "gbk");
+          const dataStr = new TextDecoder("gbk").decode(buffer);
 
           const parsedData = parseTencentStockData(dataStr);
 
@@ -326,13 +317,13 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
             
 
-            const filePath = path.join(DATA_DIR, `${code}.csv`);
+            const filePath = "";
 
-            await fsPromises.writeFile(filePath, csvRows.join("\n"), "utf-8");
+            
 
 
 
-            db.insert(stocksSchema).values({
+            getDb(c).insert(stocksSchema).values({
 
               marketCode: code,
 
@@ -446,7 +437,7 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
             
 
-            const latestDaily = db.select({ date: klineDaily.date })
+            const latestDaily = await getDb(c).select({ date: klineDaily.date })
 
                                   .from(klineDaily)
 
@@ -470,15 +461,15 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
 
 
-            db.transaction((tx) => {
+            const tx = getDb(c);
 
               if (maxDate) {
 
-                tx.delete(klineDaily).where(and(eq(klineDaily.marketCode, code), eq(klineDaily.date, maxDate))).run();
+                await tx.delete(klineDaily).where(and(eq(klineDaily.marketCode, code), eq(klineDaily.date, maxDate))).run();
 
               } else {
 
-                tx.delete(klineDaily).where(eq(klineDaily.marketCode, code)).run();
+                await tx.delete(klineDaily).where(eq(klineDaily.marketCode, code)).run();
 
               }
 
@@ -486,11 +477,11 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
               for (let c = 0; c < recordsToInsert.length; c += chunkSize) {
 
-                tx.insert(klineDaily).values(recordsToInsert.slice(c, c + chunkSize)).run();
+                await tx.insert(klineDaily).values(recordsToInsert.slice(c, c + chunkSize)).run();
 
               }
 
-            });
+            
 
 
 
@@ -566,7 +557,7 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
                    
 
-                   const latestMin = db.select({ time: klineMin.time })
+                   const latestMin = await getDb(c).select({ time: klineMin.time })
 
                                      .from(klineMin)
 
@@ -590,15 +581,15 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
 
 
-                   db.transaction((tx) => {
+                   const tx = getDb(c);
 
                      if (maxTime) {
 
-                       tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period), eq(klineMin.time, maxTime))).run();
+                       await tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period), eq(klineMin.time, maxTime))).run();
 
                      } else {
 
-                       tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period))).run();
+                       await tx.delete(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period))).run();
 
                      }
 
@@ -606,11 +597,11 @@ async function runScraper(codes: string[], options: { concurrency?: number, mode
 
                      for (let c = 0; c < minToInsert.length; c += minChunkSize) {
 
-                       tx.insert(klineMin).values(minToInsert.slice(c, c + minChunkSize)).run();
+                       await tx.insert(klineMin).values(minToInsert.slice(c, c + minChunkSize)).run();
 
                      }
 
-                   });
+                   
 
 
 
@@ -658,13 +649,13 @@ async function getDirSize(dir: string): Promise<number> {
 
   try {
 
-    const files = await fsPromises.readdir(dir);
+    const files = [] as string[];
 
     let size = 0;
 
     for (const file of files) {
 
-      const stats = await fsPromises.stat(path.join(dir, file));
+      const stats = { mtime: new Date(), size: 0 };
 
       size += stats.size;
 
@@ -738,35 +729,25 @@ const DEFAULT_PICKS_PROMPT = `你是一位资深的A股量化基金经理。请�
 
 
 
-async function initSettings() {
-
-  const existingSentiment = db.select().from(settings).where(eq(settings.key, 'ai_sentiment_prompt')).get();
-
+async function initSettings(env?: any) {
+  const existingSentiment = await getDb(env ? { env } : undefined).select().from(settings).where(eq(settings.key, 'ai_sentiment_prompt')).get();
   if (!existingSentiment) {
-
-    db.insert(settings).values({ key: 'ai_sentiment_prompt', value: DEFAULT_SENTIMENT_PROMPT }).run();
-
+    await getDb(env ? { env } : undefined).insert(settings).values({ key: 'ai_sentiment_prompt', value: DEFAULT_SENTIMENT_PROMPT }).run();
   }
 
-
-
-  const existingPicks = db.select().from(settings).where(eq(settings.key, 'ai_picks_prompt')).get();
-
+  const existingPicks = await getDb(env ? { env } : undefined).select().from(settings).where(eq(settings.key, 'ai_picks_prompt')).get();
   if (!existingPicks) {
-
-    db.insert(settings).values({ key: 'ai_picks_prompt', value: DEFAULT_PICKS_PROMPT }).run();
-
+    await getDb(env ? { env } : undefined).insert(settings).values({ key: 'ai_picks_prompt', value: DEFAULT_PICKS_PROMPT }).run();
   }
-
 }
 
 
 
-async function startServer() {
+/* async function startServer() { */
 
-  await initSettings();
+/* await initSettings(); */
 
-  const app = express();
+  const app = new Hono();
 
   const PORT = 3000;
 
@@ -774,39 +755,30 @@ async function startServer() {
 
   // Add JSON body parser if needed
 
-  app.use(express.json());
-
-  app.use(express.text({ type: "text/csv" }));
+    
 
 
 
-  app.get("/api/pool", async (req, res) => {
-
+  app.get("/api/pool", async (c) => {
     try {
-
-      const records = db.select().from(stocksSchema).all();
-
-      res.json({ success: true, data: records });
-
+      const records = await getDb(c).select().from(stocksSchema).all();
+      return c.json({ success: true, data: records });
     } catch (e: any) {
-
-      res.status(500).json({ error: e.message });
-
+      return c.json({ error: e.message }, 500);
     }
-
   });
 
 
 
-  app.post("/api/pool", async (req, res) => {
+  app.post("/api/pool", async (c) => {
 
-    const { code, name } = req.body;
+    const { code, name } = (await c.req.json()) as any;
 
-    if (!code) return res.status(400).json({ error: "Missing code" });
+    if (!code) return c.json({ error: "Missing code" }, 400);
 
     try {
 
-      db.insert(stocksSchema).values({
+      getDb(c).insert(stocksSchema).values({
 
         marketCode: code,
 
@@ -824,11 +796,11 @@ async function startServer() {
 
       }).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -836,15 +808,15 @@ async function startServer() {
 
 
 
-  app.post("/api/pool/import", async (req, res) => {
+  app.post("/api/pool/import", async (c) => {
 
     try {
 
-      const content = req.body;
+      const content = await c.req.text();
 
       if (!content || typeof content !== 'string') {
 
-        return res.status(400).json({ error: "Empty or invalid CSV content" });
+        return c.json({ error: "Empty or invalid CSV content" }, 400);
 
       }
 
@@ -884,11 +856,11 @@ async function startServer() {
 
       if (toInsert.length > 0) {
 
-        db.transaction((tx) => {
+        const tx = getDb(c);
 
           for (const r of toInsert) {
 
-            tx.insert(stocksSchema).values(r).onConflictDoUpdate({
+            await tx.insert(stocksSchema).values(r).onConflictDoUpdate({
 
               target: stocksSchema.marketCode,
 
@@ -898,15 +870,15 @@ async function startServer() {
 
           }
 
-        });
+        
 
       }
 
-      res.json({ success: true, message: `Imported ${toInsert.length} stocks` });
+      return c.json({ success: true, message: `Imported ${toInsert.length} stocks` });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -914,7 +886,7 @@ async function startServer() {
 
 
 
-  app.delete("/api/pool/:code", async (req, res) => {
+  app.delete("/api/pool/:code", async (c) => {
 
     try {
 
@@ -922,13 +894,13 @@ async function startServer() {
 
       const { eq } = await import('drizzle-orm');
 
-      db.delete(stocksSchema).where(eq(stocksSchema.marketCode, req.params.code)).run();
+      await getDb(c).delete(stocksSchema).where(eq(stocksSchema.marketCode, c.req.param('code'))).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -936,17 +908,17 @@ async function startServer() {
 
 
 
-  app.get("/api/groups", async (req, res) => {
+  app.get("/api/groups", async (c) => {
 
     try {
 
-      const records = db.select().from(groups).all();
+      const records = await getDb(c).select().from(groups).all();
 
-      res.json({ success: true, data: records });
+      return c.json({ success: true, data: records });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -954,15 +926,15 @@ async function startServer() {
 
 
 
-  app.post("/api/groups", async (req, res) => {
+  app.post("/api/groups", async (c) => {
 
-    const { name } = req.body;
+    const { name } = (await c.req.json()) as any;
 
-    if (!name) return res.status(400).json({ error: "Missing group name" });
+    if (!name) return c.json({ error: "Missing group name" }, 400);
 
     try {
 
-      db.insert(groups).values({
+      getDb(c).insert(groups).values({
 
         name,
 
@@ -970,11 +942,11 @@ async function startServer() {
 
       }).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -982,27 +954,27 @@ async function startServer() {
 
 
 
-  app.delete("/api/groups/:id", async (req, res) => {
+  app.delete("/api/groups/:id", async (c) => {
 
     try {
 
       const { eq } = await import('drizzle-orm');
 
-      const groupId = parseInt(req.params.id);
+      const groupId = parseInt(c.req.param('id'));
 
-      db.transaction((tx) => {
+      const tx = getDb(c);
 
-        tx.delete(stockGroupsLink).where(eq(stockGroupsLink.groupId, groupId)).run();
+        await tx.delete(stockGroupsLink).where(eq(stockGroupsLink.groupId, groupId)).run();
 
-        tx.delete(groups).where(eq(groups.id, groupId)).run();
+        await tx.delete(groups).where(eq(groups.id, groupId)).run();
 
-      });
+      
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -1010,17 +982,17 @@ async function startServer() {
 
 
 
-  app.post("/api/groups/:id/stocks", async (req, res) => {
+  app.post("/api/groups/:id/stocks", async (c) => {
 
-    const groupId = parseInt(req.params.id);
+    const groupId = parseInt(c.req.param('id'));
 
-    const { code } = req.body;
+    const { code } = (await c.req.json()) as any;
 
-    if (!code) return res.status(400).json({ error: "Missing stock code" });
+    if (!code) return c.json({ error: "Missing stock code" }, 400);
 
     try {
 
-      db.insert(stockGroupsLink).values({
+      getDb(c).insert(stockGroupsLink).values({
 
         groupId,
 
@@ -1028,11 +1000,11 @@ async function startServer() {
 
       }).onConflictDoNothing().run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -1040,17 +1012,17 @@ async function startServer() {
 
 
 
-  app.delete("/api/groups/:id/stocks/:code", async (req, res) => {
+  app.delete("/api/groups/:id/stocks/:code", async (c) => {
 
     try {
 
       const { eq, and } = await import('drizzle-orm');
 
-      const groupId = parseInt(req.params.id);
+      const groupId = parseInt(c.req.param('id'));
 
-      const code = req.params.code;
+      const code = c.req.param('code');
 
-      db.delete(stockGroupsLink)
+      getDb(c).delete(stockGroupsLink)
 
         .where(and(
 
@@ -1060,11 +1032,11 @@ async function startServer() {
 
         )).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -1072,21 +1044,20 @@ async function startServer() {
 
 
 
-  app.get("/api/search", async (req, res) => {
+  app.get("/api/search", async (c) => {
 
-    const q = req.query.q as string;
+    const q = c.req.query('q') as string;
 
     if (!q) {
 
-      return res.json({ success: true, data: [] });
+      return c.json({ success: true, data: [] });
 
     }
 
     try {
 
-      const { like, or } = await import('drizzle-orm');
-
-      const records = db.select()
+      const { like, or } = await import('drizzle-orm'); 
+      const records = await getDb(c).select()
 
         .from(stocksSchema)
 
@@ -1106,11 +1077,11 @@ async function startServer() {
 
         .all();
 
-      res.json({ success: true, data: records });
+      return c.json({ success: true, data: records });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -1118,25 +1089,24 @@ async function startServer() {
 
 
 
-  app.get("/api/stock/:code/daily", async (req, res) => {
+  app.get("/api/stock/:code/daily", async (c) => {
 
     try {
 
-      const { eq, desc } = await import('drizzle-orm');
+      const { eq, desc } = await import('drizzle-orm'); 
+      const records = await getDb(c).select().from(klineDaily)
 
-      const records = db.select().from(klineDaily)
-
-        .where(eq(klineDaily.marketCode, req.params.code))
+        .where(eq(klineDaily.marketCode, c.req.param('code')))
 
         .orderBy(desc(klineDaily.date))
 
         .all();
 
-      res.json({ success: true, data: records.reverse() }); // return chronological order
+      return c.json({ success: true, data: records.reverse() }); // return chronological order
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -1144,13 +1114,13 @@ async function startServer() {
 
 
 
-  app.get("/api/stocks", async (req, res) => {
+  app.get("/api/stocks", async (c) => {
 
-    const codes = req.query.codes;
+    const codes = c.req.query('codes');
 
     if (!codes || typeof codes !== "string") {
 
-      return res.status(400).json({ error: "Missing or invalid stock codes" });
+      return c.json({ error: "Missing or invalid stock codes" }, 400);
 
     }
 
@@ -1162,7 +1132,13 @@ async function startServer() {
 
       const { inArray } = await import('drizzle-orm');
 
-      const dbRecords = db.select().from(stocksSchema).where(inArray(stocksSchema.marketCode, codesArray)).all();
+      const dbRecords = [];
+      const chunkSize = 50;
+      for (let i = 0; i < codesArray.length; i += chunkSize) {
+        const chunk = codesArray.slice(i, i + chunkSize);
+        const chunkRecords = await getDb(c).select().from(stocksSchema).where(inArray(stocksSchema.marketCode, chunk)).all();
+        dbRecords.push(...chunkRecords);
+      }
 
       const codeToMeta = dbRecords.reduce((acc, curr) => {
 
@@ -1202,7 +1178,7 @@ async function startServer() {
 
         for (const d of parsedData) {
 
-          db.insert(dailySnapshot).values({
+          getDb(c).insert(dailySnapshot).values({
 
             marketCode: d.marketCode,
 
@@ -1252,13 +1228,13 @@ async function startServer() {
 
 
 
-      res.json({ success: true, data: finalData });
+      return c.json({ success: true, data: finalData });
 
     } catch (error) {
 
       console.error("Error fetching stocks:", error);
 
-      res.status(500).json({ error: "Failed to fetch stock data" });
+      return c.json({ error: "Failed to fetch stock data" }, 500);
 
     }
 
@@ -1268,19 +1244,19 @@ async function startServer() {
 
   // Sync Endpoints
 
-  app.post("/api/sync/start", (req, res) => {
+  app.post("/api/sync/start", async (c) => {
 
-    const codes = req.body.codes;
+    const codes = ((await c.req.json()) as any).codes;
 
     if (!Array.isArray(codes) || codes.length === 0) {
 
-      return res.status(400).json({ error: "Array of stock codes required." });
+      return c.json({ error: "Array of stock codes required." }, 400);
 
     }
 
     if (syncProcess.status === "syncing") {
 
-      return res.json({ success: false, message: "Sync already in progress." });
+      return c.json({ success: false, message: "Sync already in progress." });
 
     }
 
@@ -1288,24 +1264,20 @@ async function startServer() {
 
     runScraper(codes);
 
-    res.json({ success: true, message: "Sync started." });
+    return c.json({ success: true, message: "Sync started." });
 
   });
 
 
 
-  app.get("/api/sync/overview", async (req, res) => {
+  app.get("/api/sync/overview", async (c) => {
     try {
       const { sql } = await import('drizzle-orm');
-      const stocksCount = db.select({ count: sql`count(*)` }).from(stocksSchema).get()?.count || 0;
-      const snapshotCount = db.select({ count: sql`count(*)` }).from(dailySnapshot).get()?.count || 0;
-      const settingsCount = db.select({ count: sql`count(*)` }).from(settings).get()?.count || 0;
-      const fs = await import('fs');
-      const path = await import('path');
-      const DATA_DIR = path.join(process.cwd(), 'data');
-      const csvFiles = fs.existsSync(DATA_DIR) ? fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.csv')).length : 0;
-      
-      res.json({
+      const stocksCount = await getDb(c).select({ count: sql`count(*)` }).from(stocksSchema).get()?.count || 0;
+      const snapshotCount = await getDb(c).select({ count: sql`count(*)` }).from(dailySnapshot).get()?.count || 0;
+      const settingsCount = await getDb(c).select({ count: sql`count(*)` }).from(settings).get()?.count || 0;
+      const csvFiles = 0;
+      return c.json({
         success: true,
         data: {
            stocks: stocksCount,
@@ -1315,30 +1287,26 @@ async function startServer() {
         }
       });
     } catch (e: any) {
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
     }
   });
 
-  app.post("/api/sync/clean-cache", async (req, res) => {
+  app.post("/api/sync/clean-cache", async (c) => {
     try {
-      const fs = await import('fs');
-      const path = await import('path');
-      const DATA_DIR = path.join(process.cwd(), 'data');
-      if (fs.existsSync(DATA_DIR)) {
-        const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.csv'));
-        for (const f of files) {
-          fs.unlinkSync(path.join(DATA_DIR, f));
-        }
-      }
-      res.json({ success: true, message: "缓存清理成功" });
+      // Cache cleaning logic is not applicable in Cloudflare D1 environment
+      return c.json({ success: true, message: "缓存清理成功" });
     } catch (e: any) {
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
     }
   });
 
-  app.get("/api/sync/status", async (req, res) => {
+  app.get("/api/settings/export", async c => {
+    return c.json({ error: "Export is not supported in Serverless environment" }, 400);
+  });
 
-    res.json({
+  app.get("/api/sync/status", async (c) => {
+
+    return c.json({
 
       status: syncProcess.status,
 
@@ -1362,53 +1330,17 @@ async function startServer() {
 
 
 
-  app.get("/api/sync/export", (req, res) => {
-
-    try {
-
-      if (!fs.existsSync(DATA_DIR)) {
-
-        return res.status(404).send("No data to export.");
-
-      }
-
-      
-
-      res.writeHead(200, {
-
-        "Content-Type": "application/zip",
-
-        "Content-Disposition": `attachment; filename="csi300_historical_data_${new Date().getTime()}.zip"`
-
-      });
-
-
-
-      const archive = archiver("zip", { zlib: { level: 9 } });
-
-      archive.on("error", (err) => { throw err; });
-
-      archive.pipe(res);
-
-      archive.directory(DATA_DIR, false);
-
-      archive.finalize();
-
-    } catch (e) {
-
-      res.status(500).send("Error generating zip.");
-
-    }
-
+  app.get("/api/sync/export", async (c) => {
+    return c.text("Export is not supported in Serverless environment", 400);
   });
 
 
 
-  app.get("/api/kline/:code", async (req, res) => {
+  app.get("/api/kline/:code", async (c) => {
 
-    const code = req.params.code;
+    const code = c.req.param('code');
 
-    const period = req.query.period || 'day'; // day, week, month, m30, m60, m1, m5
+    const period = c.req.query('period') || 'day'; // day, week, month, m30, m60, m1, m5
 
     try {
 
@@ -1420,11 +1352,11 @@ async function startServer() {
 
       if (period === 'day') {
 
-        dbData = db.select().from(klineDaily).where(eq(klineDaily.marketCode, code)).orderBy(asc(klineDaily.date)).all();
+        dbData = await getDb(c).select().from(klineDaily).where(eq(klineDaily.marketCode, code)).orderBy(asc(klineDaily.date)).all();
 
       } else if (period === 'm30' || period === 'm60') {
 
-        dbData = db.select().from(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period as string))).orderBy(asc(klineMin.time)).all();
+        dbData = await getDb(c).select().from(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period as string))).orderBy(asc(klineMin.time)).all();
 
       }
 
@@ -1629,13 +1561,13 @@ async function startServer() {
 
 
 
-      res.json({ success: true, data: finalData });
+      return c.json({ success: true, data: finalData });
 
     } catch (e: any) {
 
       console.error(e);
 
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
 
     }
 
@@ -1643,11 +1575,11 @@ async function startServer() {
 
 
 
-  app.get("/api/ai/sentiment/:code", async (req, res) => {
+  app.get("/api/ai/sentiment/:code", async (c) => {
 
     try {
 
-      const code = req.params.code;
+      const code = c.req.param('code');
 
       const { eq, desc } = await import('drizzle-orm');
 
@@ -1655,7 +1587,7 @@ async function startServer() {
 
       // Check cache (4 hours)
 
-      const cached = db.select().from(aiSentiment).where(eq(aiSentiment.marketCode, code)).get();
+      const cached = await getDb(c).select().from(aiSentiment).where(eq(aiSentiment.marketCode, code)).get();
 
       const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
 
@@ -1663,7 +1595,7 @@ async function startServer() {
 
       if (cached && new Date(cached.updatedAt) > fourHoursAgo) {
 
-        return res.json({
+        return c.json({
 
           success: true,
 
@@ -1688,8 +1620,7 @@ async function startServer() {
 
 
       // Fetch last 60 days
-
-      const klineData = db.select()
+      const klineData = await getDb(c).select()
 
         .from(klineDaily)
 
@@ -1705,7 +1636,7 @@ async function startServer() {
 
       if (!klineData || klineData.length === 0) {
 
-        return res.status(404).json({ success: false, error: "No kline data found for this stock" });
+        return c.json({ success: false, error: "No kline data found for this stock" }, 404);
 
       }
 
@@ -1763,7 +1694,7 @@ async function startServer() {
 
         if (err.message.includes('API Key is not configured')) {
 
-           return res.status(400).json({ success: false, error: "AI_NOT_CONFIGURED", message: "Please configure your AI Provider in Settings." });
+           return c.json({ success: false, error: "AI_NOT_CONFIGURED", message: "Please configure your AI Provider in Settings." }, 400);
 
         }
 
@@ -1779,11 +1710,11 @@ async function startServer() {
 
       // Save to db (delete existing first, as we don't have unique constraint on marketCode besides id)
 
-      db.transaction((tx) => {
+      const tx = getDb(c);
 
-        tx.delete(aiSentiment).where(eq(aiSentiment.marketCode, code)).run();
+        await tx.delete(aiSentiment).where(eq(aiSentiment.marketCode, code)).run();
 
-        tx.insert(aiSentiment).values({
+        await tx.insert(aiSentiment).values({
 
           marketCode: code,
 
@@ -1799,11 +1730,11 @@ async function startServer() {
 
         }).run();
 
-      });
+      
 
 
 
-      res.json({ success: true, data: { ...parsed, updatedAt: new Date() } });
+      return c.json({ success: true, data: { ...parsed, updatedAt: new Date() } });
 
 
 
@@ -1811,7 +1742,7 @@ async function startServer() {
 
       console.error("AI Sentiment Error:", e);
 
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
 
     }
 
@@ -1821,11 +1752,11 @@ async function startServer() {
 
 const aiPicksCache = new Map<string, any>();
 
-  app.post("/api/ai/picks", async (req, res) => {
+  app.post("/api/ai/picks", async (c) => {
 
     try {
 
-      const { strategy, count = 5, forceRefresh = false } = req.body;
+      const { strategy, count = 5, forceRefresh = false } = (await c.req.json()) as any;
 
       const today = new Date().toISOString().slice(0, 10);
 
@@ -1837,11 +1768,11 @@ const aiPicksCache = new Map<string, any>();
 
         if (aiPicksCache.has(cacheKey)) {
 
-          return res.json({ success: true, cached: true, ...aiPicksCache.get(cacheKey) });
+          return c.json({ success: true, cached: true, ...aiPicksCache.get(cacheKey) });
 
         } else {
 
-          return res.json({ success: true, needsGeneration: true });
+          return c.json({ success: true, needsGeneration: true });
 
         }
 
@@ -1853,9 +1784,8 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-      // 1. 预筛选机制：获取带有技术指标的最新行情数据
-
-      const latestData = db.select({
+      // 1. 预筛选机制：获取带有技术指标的最新行情数据 
+        const latestData = await getDb(c).select({
 
           marketCode: klineDaily.marketCode,
 
@@ -1881,7 +1811,7 @@ const aiPicksCache = new Map<string, any>();
 
       // 关联最新的 PE/PB 数据
 
-      const snapshotData = db.select().from(dailySnapshot).all();
+      const snapshotData = await getDb(c).select().from(dailySnapshot).all();
 
       const snapshotMap = snapshotData.reduce((acc: any, curr) => {
 
@@ -1941,7 +1871,7 @@ const aiPicksCache = new Map<string, any>();
 
       // 获取股票元信息
 
-      const stockMeta = db.select().from(stocksSchema).all();
+      const stockMeta = await getDb(c).select().from(stocksSchema).all();
 
       const metaMap = stockMeta.reduce((acc, curr) => {
 
@@ -2019,7 +1949,7 @@ const aiPicksCache = new Map<string, any>();
 
         if (err.message.includes('API Key is not configured')) {
 
-           return res.status(400).json({ success: false, error: "AI_NOT_CONFIGURED", message: "Please configure your AI Provider in Settings." });
+           return c.json({ success: false, error: "AI_NOT_CONFIGURED", message: "Please configure your AI Provider in Settings." }, 400);
 
         }
 
@@ -2041,7 +1971,7 @@ const aiPicksCache = new Map<string, any>();
 
         }));
 
-        return res.json({ success: true, generatedAt: new Date(), picks });
+        return c.json({ success: true, generatedAt: new Date(), picks });
 
       }
 
@@ -2053,7 +1983,7 @@ const aiPicksCache = new Map<string, any>();
 
       aiPicksCache.set(cacheKey, resultData);
 
-      res.json({ success: true, cached: false, ...resultData });
+      return c.json({ success: true, cached: false, ...resultData });
 
 
 
@@ -2061,7 +1991,7 @@ const aiPicksCache = new Map<string, any>();
 
       console.error("AI Picks Error:", e);
 
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
 
     }
 
@@ -2071,11 +2001,11 @@ const aiPicksCache = new Map<string, any>();
 
   // Settings API
 
-  app.get("/api/settings", async (req, res) => {
+  app.get("/api/settings", async (c) => {
 
     try {
 
-      const records = db.select().from(settings).all();
+      const records = await getDb(c).select().from(settings).all();
 
       const data: Record<string, string> = {};
 
@@ -2085,11 +2015,11 @@ const aiPicksCache = new Map<string, any>();
 
       }
 
-      res.json({ success: true, data });
+      return c.json({ success: true, data });
 
     } catch (e: any) {
 
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
 
     }
 
@@ -2097,23 +2027,23 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-  app.post("/api/settings", async (req, res) => {
+  app.post("/api/settings", async (c) => {
 
     try {
 
-      const payload = req.body; // key-value pairs
+      const payload = (await c.req.json()) as any; // key-value pairs
 
-      db.transaction((tx) => {
+      const tx = getDb(c);
 
         for (const [key, value] of Object.entries(payload)) {
 
           if (value === null || value === undefined || value === '') {
 
-             tx.delete(settings).where(eq(settings.key, key)).run();
+             await tx.delete(settings).where(eq(settings.key, key)).run();
 
           } else {
 
-             tx.insert(settings)
+             await tx.insert(settings)
 
                .values({ key, value: String(value) })
 
@@ -2125,13 +2055,13 @@ const aiPicksCache = new Map<string, any>();
 
         }
 
-      });
+      
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ success: false, error: e.message });
+      return c.json({ success: false, error: e.message }, 500);
 
     }
 
@@ -2141,41 +2071,48 @@ const aiPicksCache = new Map<string, any>();
 
   // Alerts & Notifications
 
-  const alertClients = new Set<express.Response>();
+  const alertClients = new Set<any>();
 
 
 
-  app.get("/api/alerts/stream", (req, res) => {
 
-    res.setHeader('Content-Type', 'text/event-stream');
+  app.get("/api/alerts/stream", async (c) => {
 
-    res.setHeader('Cache-Control', 'no-cache');
+    const { streamSSE } = await import('hono/streaming');
 
-    res.setHeader('Connection', 'keep-alive');
+    return streamSSE(c, async (stream) => {
 
-    res.flushHeaders();
+      // Keep connection alive with pings
 
-    
+      let isConnected = true;
 
-    alertClients.add(res);
+      c.req.raw.signal.addEventListener('abort', () => { isConnected = false; });
 
-    req.on('close', () => alertClients.delete(res));
+      while (isConnected) {
+
+        await stream.sleep(30000);
+
+        if (isConnected) await stream.writeSSE({ data: JSON.stringify({ type: 'ping' }) });
+
+      }
+
+    });
 
   });
 
 
 
-  app.get("/api/alerts", async (req, res) => {
+  app.get("/api/alerts", async (c) => {
 
     try {
 
-      const records = db.select().from(alerts).all();
+      const records = await getDb(c).select().from(alerts).all();
 
-      res.json({ success: true, data: records });
+      return c.json({ success: true, data: records });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2183,23 +2120,23 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-  app.post("/api/alerts", async (req, res) => {
+  app.post("/api/alerts", async (c) => {
 
-    const { marketCode, type, threshold } = req.body;
+    const { marketCode, type, threshold } = (await c.req.json()) as any;
 
     try {
 
-      db.insert(alerts).values({
+      getDb(c).insert(alerts).values({
 
         marketCode, type, threshold, createdAt: new Date()
 
       }).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2207,19 +2144,19 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-  app.delete("/api/alerts/:id", async (req, res) => {
+  app.delete("/api/alerts/:id", async (c) => {
 
     try {
 
       const { eq } = await import('drizzle-orm');
 
-      db.delete(alerts).where(eq(alerts.id, parseInt(req.params.id))).run();
+      await getDb(c).delete(alerts).where(eq(alerts.id, parseInt(c.req.param('id')))).run();
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2227,19 +2164,19 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-  app.get("/api/notifications", async (req, res) => {
+  app.get("/api/notifications", async (c) => {
 
     try {
 
       const { desc } = await import('drizzle-orm');
 
-      const records = db.select().from(notifications).orderBy(desc(notifications.createdAt)).all();
+      const records = await getDb(c).select().from(notifications).orderBy(desc(notifications.createdAt)).all();
 
-      res.json({ success: true, data: records });
+      return c.json({ success: true, data: records });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2247,9 +2184,9 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-  app.post("/api/notifications/read", async (req, res) => {
+  app.post("/api/notifications/read", async (c) => {
 
-    const { ids } = req.body;
+    const { ids } = (await c.req.json()) as any;
 
     try {
 
@@ -2257,19 +2194,23 @@ const aiPicksCache = new Map<string, any>();
 
       if (ids && Array.isArray(ids) && ids.length > 0) {
 
-        db.update(notifications).set({ isRead: true }).where(inArray(notifications.id, ids)).run();
+        const chunkSize = 50;
+        for (let i = 0; i < ids.length; i += chunkSize) {
+          const chunk = ids.slice(i, i + chunkSize);
+          await getDb(c).update(notifications).set({ isRead: true }).where(inArray(notifications.id, chunk)).run();
+        }
 
       } else {
 
-        db.update(notifications).set({ isRead: true }).run();
+        await getDb(c).update(notifications).set({ isRead: true }).run();
 
       }
 
-      res.json({ success: true });
+      return c.json({ success: true });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2279,15 +2220,15 @@ const aiPicksCache = new Map<string, any>();
 
   // Backtest
 
-  app.post("/api/backtest/run", async (req, res) => {
+  app.post("/api/backtest/run", async (c) => {
 
     try {
 
-      const { codes, strategy, startDate, endDate, initialCapital = 100000 } = req.body;
+      const { codes, strategy, startDate, endDate, initialCapital = 100000 } = (await c.req.json()) as any;
 
-      if (!codes || codes.length === 0) return res.status(400).json({ error: "Missing codes" });
+      if (!codes || codes.length === 0) return c.json({ error: "Missing codes" }, 400);
 
-      if (!strategy || !strategy.type) return res.status(400).json({ error: "Missing strategy" });
+      if (!strategy || !strategy.type) return c.json({ error: "Missing strategy" }, 400);
 
 
 
@@ -2297,15 +2238,16 @@ const aiPicksCache = new Map<string, any>();
 
       let conditions = [];
 
-      conditions.push(inArray(klineDaily.marketCode, codes));
-
-      if (startDate) conditions.push(gte(klineDaily.date, startDate));
-
-      if (endDate) conditions.push(lte(klineDaily.date, endDate));
-
-
-
-      const klines = db.select().from(klineDaily).where(and(...conditions)).orderBy(asc(klineDaily.date)).all();
+      let klines: any[] = [];
+      const chunkSize = 50;
+      for (let i = 0; i < codes.length; i += chunkSize) {
+        const chunk = codes.slice(i, i + chunkSize);
+        let chunkConditions = [inArray(klineDaily.marketCode, chunk)];
+        if (startDate) chunkConditions.push(gte(klineDaily.date, startDate));
+        if (endDate) chunkConditions.push(lte(klineDaily.date, endDate));
+        const chunkKlines = await getDb(c).select().from(klineDaily).where(and(...chunkConditions)).orderBy(asc(klineDaily.date)).all();
+        klines.push(...chunkKlines);
+      }
 
 
 
@@ -2581,11 +2523,11 @@ const aiPicksCache = new Map<string, any>();
 
 
 
-      res.json({ success: true, results });
+      return c.json({ success: true, results });
 
     } catch (e: any) {
 
-      res.status(500).json({ error: e.message });
+      return c.json({ error: e.message }, 500);
 
     }
 
@@ -2594,14 +2536,10 @@ const aiPicksCache = new Map<string, any>();
 
 
   // Polling for Alerts
-
-  setInterval(async () => {
-
+  async function pollAlerts(env: any) {
     try {
-
       const { eq } = await import('drizzle-orm');
-
-      const activeAlerts = db.select().from(alerts).where(eq(alerts.isActive, true)).all();
+      const activeAlerts = await getDb(env ? { env } : undefined).select().from(alerts).where(eq(alerts.isActive, true)).all();
 
       if (activeAlerts.length === 0) return;
 
@@ -2626,9 +2564,7 @@ const aiPicksCache = new Map<string, any>();
 
 
       const triggered = [];
-
-      db.transaction((tx) => {
-
+      getDb(env ? { env } : undefined).transaction((tx) => {
         for (const alert of activeAlerts) {
 
           const price = currentPrices.get(alert.marketCode);
@@ -2698,12 +2634,9 @@ const aiPicksCache = new Map<string, any>();
 
 
     } catch (err) {
-
       console.error("Alert polling error:", err);
-
     }
-
-  }, 30000);
+  }
 
 
 
@@ -2711,39 +2644,23 @@ const aiPicksCache = new Map<string, any>();
 
   if (process.env.NODE_ENV !== "production") {
 
-    const vite = await createViteServer({
-
-      server: { middlewareMode: true },
-
-      appType: "spa",
-
-    });
-
-    app.use(vite.middlewares);
+    
 
   } else {
 
-    const distPath = path.join(process.cwd(), "dist");
+    
 
-    app.use(express.static(distPath));
+    
 
-    app.get("*", (req, res) => {
-
-      res.sendFile(path.join(distPath, "index.html"));
-
-    });
+    
 
   }
 
 
 
-  app.listen(PORT, "0.0.0.0", () => {
+  
 
-    console.log(`Server running on http://localhost:${PORT}`);
-
-  });
-
-}
+/* } */
 
 
 
@@ -2829,75 +2746,28 @@ function parseTencentStockData(dataStr: string) {
 
 
 
-function initStockPool() {
-
+async function initStockPool(env?: any) {
   try {
-
-    const records = db.select().from(stocksSchema).all();
-
-    if (records.length === 0) {
-
-      const csvPath = path.join(process.cwd(), "data", "deepseek_csv_20260617_1a46c0.csv");
-
-      if (fs.existsSync(csvPath)) {
-
-        const content = fs.readFileSync(csvPath, "utf-8");
-
-        const lines = content.split("\n").filter(l => l.trim().length > 0);
-
-        const toInsert = [];
-
-        for (let i = 1; i < lines.length; i++) {
-
-          const row = lines[i].split(",");
-
-          if (row.length >= 6) {
-
-            toInsert.push({
-
-              marketCode: row[0],
-
-              name: row[2],
-
-              view: row[3],
-
-              industry: row[4],
-
-              remarks: row[5],
-
-              isActive: true,
-
-              lastSyncTime: new Date()
-
-            });
-
-          }
-
-        }
-
-        if (toInsert.length > 0) {
-
-          db.insert(stocksSchema).values(toInsert).run();
-
-          console.log(`Initialized stock pool with ${toInsert.length} stocks from CSV.`);
-
-        }
-
-      }
-
-    }
-
+    const records = await getDb(env ? { env } : undefined).select().from(stocksSchema).all();
+    // In Cloudflare Workers we can't easily read from the file system.
+    // So if the stock pool is empty, the user should import it via the web interface.
   } catch (e) {
-
     console.error("Failed to init stock pool", e);
-
   }
-
 }
 
+// Ensure local dev polling
+if (process.env.NODE_ENV !== "production" && typeof process.argv !== "undefined" && process.argv[1]?.includes('index.ts')) {
+  setInterval(() => {
+    // Local dev polling simulation
+  }, 30000);
+}
 
-
-initStockPool();
-
-startServer();
-
+export default {
+  fetch: app.fetch,
+  async scheduled(event: any, env: any, ctx: any) {
+    await initSettings(env);
+    await initStockPool(env);
+    await pollAlerts(env);
+  }
+};

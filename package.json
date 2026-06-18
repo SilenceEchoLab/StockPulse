@@ -12,14 +12,15 @@
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
+    "@hono/node-server": "^2.0.5",
+    "@libsql/client": "^0.17.4",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "archiver": "^8.0.0",
-    "better-sqlite3": "^12.11.1",
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.45.2",
-    "express": "^4.22.2",
+    "hono": "^4.12.25",
     "iconv-lite": "^0.7.2",
     "lightweight-charts": "^5.2.0",
     "lru-cache": "^11.5.1",
@@ -36,9 +37,8 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260617.1",
     "@types/archiver": "^8.0.0",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/express": "^4.17.25",
     "@types/iconv-lite": "^0.0.1",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
