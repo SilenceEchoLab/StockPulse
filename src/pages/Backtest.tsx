@@ -7,7 +7,6 @@ export default function Backtest() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
   const chartRef = useRef<HTMLDivElement>(null);
-  const [chartInstance, setChartInstance] = useState<IChartApi | null>(null);
 
   const [formData, setFormData] = useState({
     codes: "sh600519",
@@ -57,10 +56,6 @@ export default function Backtest() {
   useEffect(() => {
     if (!result || !chartRef.current) return;
     
-    if (chartInstance) {
-      chartInstance.remove();
-    }
-
     const chart = createChart(chartRef.current, {
       layout: {
         background: { type: 'solid', color: 'transparent' } as any,
@@ -86,14 +81,17 @@ export default function Backtest() {
     });
 
     if (result.equityCurve && result.equityCurve.length > 0) {
-      equitySeries.setData(result.equityCurve.map((d: any) => ({
-        time: Math.floor(new Date(d.date).getTime() / 1000) as any,
+      // Ensure unique and sorted dates to prevent lightweight-charts errors
+      const uniqueData = Array.from(new Map(result.equityCurve.map((d: any) => [d.date, d])).values());
+      const sortedData = uniqueData.sort((a: any, b: any) => a.date.localeCompare(b.date));
+      
+      equitySeries.setData(sortedData.map((d: any) => ({
+        time: d.date as string,
         value: d.equity
       })));
     }
 
     chart.timeScale().fitContent();
-    setChartInstance(chart);
 
     return () => {
       chart.remove();

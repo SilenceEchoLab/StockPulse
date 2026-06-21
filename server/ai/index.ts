@@ -10,8 +10,9 @@ export async function getAiClient(c?: any) {
     config[s.key] = s.value;
   }
 
-  const baseURL = config['ai_base_url'] || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-  const apiKey = config['ai_api_key'] || process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY || '';
+  const env = c?.env || (typeof process !== 'undefined' ? process.env : {});
+  const baseURL = config['ai_base_url'] || env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const apiKey = config['ai_api_key'] || env.OPENAI_API_KEY || env.GEMINI_API_KEY || '';
   
   if (!apiKey) {
     throw new Error('API Key is not configured. Please configure it in settings.');

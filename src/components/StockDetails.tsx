@@ -1,34 +1,11 @@
 import { useState, useEffect } from "react";
-import { Plus, Bell, Minus } from "lucide-react";
+import { Plus, Bell, Minus, X } from "lucide-react";
 import useSWR from "swr";
-import { StockData } from "../types";
+import { StockData, type KlineData } from "../types";
 import { KLineChart } from "./KLineChart";
 import { Button } from "./ui/Button";
 import { useNavigate } from "react-router-dom";
-
-const fetcher = (url: string) => fetch(url).then((res) => {
-  if (!res.ok) throw new Error("Failed to fetch");
-  return res.json();
-});
-
-interface KlineData {
-  date: string;
-  open: number;
-  close: number;
-  high: number;
-  low: number;
-  volume: number;
-  macd?: number;
-  macdSignal?: number;
-  macdHist?: number;
-  rsi14?: number;
-  bollMid?: number;
-  bollUpper?: number;
-  bollLower?: number;
-  kdjK?: number;
-  kdjD?: number;
-  kdjJ?: number;
-}
+import { fetcher } from "../lib/api";
 
 export default function StockDetails({ stock, onBack }: { stock: StockData; onBack: () => void }) {
   const [period, setPeriod] = useState<string>('day');
@@ -38,7 +15,51 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
   const [aiSentiment, setAiSentiment] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState<boolean>(true);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [signalReport, setSignalReport] = useState<any>(null);
   const navigate = useNavigate();
+
+  // 价格预警弹窗状态
+  const [showAlertModal, setShowAlertModal] = useState(false);
+  const [alertType, setAlertType] = useState<'price_above' | 'price_below'>('price_above');
+  const [alertThreshold, setAlertThreshold] = useState('');
+  const [alertSubmitting, setAlertSubmitting] = useState(false);
+  const [alertToast, setAlertToast] = useState<string | null>(null);
+
+  const openAlertModal = () => {
+    setAlertThreshold(stock.price.toFixed(2));
+    setAlertType('price_above');
+    setShowAlertModal(true);
+  };
+
+  const createAlert = async () => {
+    const threshold = parseFloat(alertThreshold);
+    if (isNaN(threshold) || threshold <= 0) return;
+    setAlertSubmitting(true);
+    try {
+      const res = await fetch('/api/alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marketCode: stock.marketCode, type: alertType, threshold })
+      });
+      if (res.ok) {
+        setShowAlertModal(false);
+        setAlertToast(`预警已设置：${alertType === 'price_above' ? '涨破' : '跌破'} ${threshold}`);
+        setTimeout(() => setAlertToast(null), 3000);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAlertSubmitting(false);
+    }
+  };
+
+  // 主力资金动向（基于 L1 主动买卖盘估算）
+  const outer = stock.outerDisc || 0;
+  const inner = stock.innerDisc || 0;
+  const totalDisc = outer + inner;
+  const netDisc = outer - inner;
+  const netRatio = totalDisc > 0 ? netDisc / totalDisc : 0;
+  const isNetInflow = netDisc >= 0;
 
   useEffect(() => {
     const fetchAi = async () => {
@@ -63,6 +84,22 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
       }
     };
     fetchAi();
+  }, [stock.marketCode]);
+
+  // 量化买卖信号（纯本地引擎，无需 AI Key）
+  useEffect(() => {
+    const fetchSignals = async () => {
+      try {
+        const res = await fetch(`/api/ai/signals/${stock.marketCode}`);
+        const json = await res.json();
+        if (res.ok && json.success) {
+          setSignalReport(json.data);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    fetchSignals();
   }, [stock.marketCode]);
 
   useEffect(() => {
@@ -113,21 +150,16 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
   const loading = klineLoading;
   const error = klineSwrError?.message || (klineRes && !klineRes.success ? klineRes.error : null);
 
+  // B2 修复：统一A股配色（红涨绿跌），与CSS令牌一致
   const getFormatForChange = (val: number) => {
-    if (val > 0) return "text-trading-up"; // trading-up is green, Wait, standard market: red is up in China. But I'll stick to original Binance logic where green is up. Wait, original used #f23645 (red) for > 0 and #1bb154 (green) for < 0 because it's a Chinese stock tracker!
-    // In China: Red (#f23645) is UP. Green (#1bb154) is DOWN.
-    // In DESIGN.md Binance style: Green (#0ecb81) is UP. Red (#f6465d) is DOWN.
-    // So let's map: > 0 to trading-down (red) so it displays red? NO, wait.
-    // Binance style `trading-up` is Green. If the user expects Red for UP, we should map it properly.
-    // But since DESIGN.md says `trading-up` is green, let's keep Binance semantics: green is up, red is down.
-    if (val > 0) return "text-trading-up";
-    if (val < 0) return "text-trading-down";
+    if (val > 0) return "text-trading-up";   // 红 = 涨
+    if (val < 0) return "text-trading-down"; // 绿 = 跌
     return "text-muted";
   };
 
-  // Keep Chinese market color conventions for the chart itself but using CSS variables
-  const colorUp = "var(--color-trading-down)"; // Red for UP (A-share)
-  const colorDown = "var(--color-trading-up)"; // Green for DOWN (A-share)
+  // K线图配色（与CSS令牌一致：红涨绿跌）
+  const colorUp = "var(--color-trading-up)";    // 红 = 涨
+  const colorDown = "var(--color-trading-down)"; // 绿 = 跌
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -236,7 +268,7 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
            <Button onClick={togglePool} variant="secondary-on-dark" className={`flex items-center gap-1.5 px-3 py-1.5 border border-hairline-dark rounded text-[12px] transition-colors ${inPool ? 'text-primary' : 'text-body-dark'}`}>
              {inPool ? <Minus className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />} {inPool ? '删自选' : '加自选'}
            </Button>
-           <Button variant="secondary-on-dark" className="flex items-center gap-1.5 px-3 py-1.5 border border-hairline-dark rounded text-[12px] text-body-dark transition-colors">
+           <Button variant="secondary-on-dark" onClick={openAlertModal} className="flex items-center gap-1.5 px-3 py-1.5 border border-hairline-dark rounded text-[12px] text-body-dark transition-colors">
              <Bell className="w-3.5 h-3.5" /> 预警
            </Button>
            <Button 
@@ -376,17 +408,174 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
                </div>
              )}
            </div>
+
+           {/* 量化买卖信号引擎 —— 基于《选股交易操作手册》 */}
+           {signalReport && (
+             <div>
+               <h4 className="text-[13px] font-medium text-white mb-3 pl-2 border-l-2 border-primary">
+                 量化交易信号
+               </h4>
+               <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col gap-4">
+                 {/* 综合评分 + 多空排列 */}
+                 <div className="flex items-center justify-between pb-3 border-b border-hairline-dark">
+                   <div className="flex flex-col">
+                     <span className={`text-[28px] font-mono leading-none ${signalReport.score >= 60 ? 'text-trading-up' : signalReport.score <= 35 ? 'text-trading-down' : 'text-info'}`}>
+                       {signalReport.score}
+                     </span>
+                     <span className="text-[11px] text-muted mt-1">{signalReport.scoreLabel}</span>
+                   </div>
+                   <div className={`px-2.5 py-1 rounded text-[11px] font-medium ${
+                     signalReport.alignment === 'bullish' ? 'bg-trading-up/10 text-trading-up' :
+                     signalReport.alignment === 'bearish' ? 'bg-trading-down/10 text-trading-down' : 'bg-surface-elevated-dark text-muted'
+                   }`}>
+                     {signalReport.alignment === 'bullish' ? '多头排列' : signalReport.alignment === 'bearish' ? '空头排列' : '方向不明'}
+                   </div>
+                 </div>
+
+                 {/* 评分维度 */}
+                 <div className="grid grid-cols-4 gap-2">
+                   {[
+                     { label: '趋势', val: signalReport.breakdown.trend, max: 40 },
+                     { label: '结构', val: signalReport.breakdown.structure, max: 30 },
+                     { label: '量价', val: signalReport.breakdown.volumePrice, max: 15 },
+                     { label: '时机', val: signalReport.breakdown.timing, max: 15 },
+                   ].map(d => (
+                     <div key={d.label} className="flex flex-col items-center">
+                       <div className="w-full h-1 bg-surface-elevated-dark rounded-full overflow-hidden mb-1">
+                         <div className="bg-primary h-full" style={{ width: `${d.max > 0 ? (d.val / d.max) * 100 : 0}%` }} />
+                       </div>
+                       <span className="text-[10px] text-muted">{d.label}</span>
+                       <span className="text-[11px] font-mono text-body-dark">{d.val}/{d.max}</span>
+                     </div>
+                   ))}
+                 </div>
+
+                 {/* 风险标签 */}
+                 {signalReport.riskTags.length > 0 && (
+                   <div className="flex flex-wrap gap-1.5">
+                     {signalReport.riskTags.map((tag: any, i: number) => (
+                       <span key={i} className={`text-[10px] px-2 py-0.5 rounded ${
+                         tag.level === 'danger' ? 'bg-trading-down/10 text-trading-down' :
+                         tag.level === 'warning' ? 'bg-yellow-500/10 text-yellow-500' : 'bg-surface-elevated-dark text-muted'
+                       }`} title={tag.detail}>
+                         {tag.name}
+                       </span>
+                     ))}
+                   </div>
+                 )}
+
+                 {/* 买入信号 */}
+                 {signalReport.buySignals.length > 0 && (
+                   <div>
+                     <h5 className="text-[11px] text-trading-up mb-2">买入信号 ({signalReport.buySignals.length})</h5>
+                     <div className="flex flex-col gap-1.5">
+                       {signalReport.buySignals.map((sig: any, i: number) => (
+                         <div key={i} className="flex items-start gap-2 text-[12px]">
+                           <span className="text-trading-up shrink-0 mt-0.5">▲</span>
+                           <div className="flex-1">
+                             <span className="text-body-dark">{sig.name}</span>
+                             <span className="text-muted ml-1.5 text-[11px]">{sig.detail}</span>
+                           </div>
+                         </div>
+                       ))}
+                     </div>
+                   </div>
+                 )}
+
+                 {/* 卖出信号 */}
+                 {signalReport.sellSignals.length > 0 && (
+                   <div>
+                     <h5 className="text-[11px] text-trading-down mb-2">卖出信号 ({signalReport.sellSignals.length})</h5>
+                     <div className="flex flex-col gap-1.5">
+                       {signalReport.sellSignals.map((sig: any, i: number) => (
+                         <div key={i} className="flex items-start gap-2 text-[12px]">
+                           <span className={`shrink-0 mt-0.5 ${sig.urgency === 'high' ? 'text-trading-down font-bold' : 'text-trading-down'}`}>▼</span>
+                           <div className="flex-1">
+                             <span className="text-body-dark">{sig.name}</span>
+                             {sig.urgency === 'high' && <span className="ml-1.5 text-[10px] text-trading-down">[高危]</span>}
+                             <span className="text-muted ml-1 text-[11px]">{sig.detail}</span>
+                           </div>
+                         </div>
+                       ))}
+                     </div>
+                   </div>
+                 )}
+
+                 {/* 操作建议 */}
+                 <div className="pt-3 border-t border-hairline-dark">
+                   <p className="text-[12px] text-primary leading-relaxed">{signalReport.suggestion}</p>
+                 </div>
+               </div>
+             </div>
+           )}
            
            <div>
              <h4 className="text-[13px] font-medium text-white mb-3 pl-2 border-l-2 border-primary">
-               主力资金分析
+               主力资金动向
              </h4>
-             <div className="bg-canvas-dark border border-hairline-dark rounded p-4 text-center py-8 text-[12px] text-muted">
-               等待 L2 数据源接入...
+             <div className="bg-canvas-dark border border-hairline-dark rounded p-4">
+               <div className="flex items-center justify-between mb-3">
+                 <span className="text-[12px] text-muted">主动净流向(估)</span>
+                 <span className={`text-[16px] font-mono font-bold ${isNetInflow ? 'text-trading-up' : 'text-trading-down'}`}>
+                   {isNetInflow ? '+' : ''}{(netDisc * stock.price * 100 / 10000).toFixed(0)}万
+                 </span>
+               </div>
+               <div className="mb-2">
+                 <div className="flex justify-between text-[11px] mb-1">
+                   <span className="text-trading-up">外盘(主买) {outer.toLocaleString()}</span>
+                   <span className="text-trading-down">{inner.toLocaleString()} 内盘(主卖)</span>
+                 </div>
+                 <div className="flex h-2 rounded-full overflow-hidden bg-trading-down">
+                   <div className="bg-trading-up transition-all" style={{ width: `${totalDisc > 0 ? (outer / totalDisc) * 100 : 50}%` }} />
+                 </div>
+               </div>
+               <div className="flex items-center justify-between pt-2 border-t border-hairline-dark">
+                 <span className={`text-[11px] px-2 py-0.5 rounded ${isNetInflow ? 'bg-trading-up/10 text-trading-up' : 'bg-trading-down/10 text-trading-down'}`}>
+                   {isNetInflow ? '买盘占优 偏多' : '卖盘占优 偏空'}
+                 </span>
+                 <span className="text-[11px] text-muted font-mono">净比 {(Math.abs(netRatio) * 100).toFixed(1)}%</span>
+               </div>
+               <p className="text-[10px] text-muted mt-3 leading-relaxed">
+                 基于主动买卖盘(L1)估算主力方向。逐笔大单/超大单资金流需接入 L2 行情数据源。
+               </p>
              </div>
            </div>
         </div>
       </div>
+
+      {/* 价格预警弹窗 */}
+      {showAlertModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowAlertModal(false)}>
+          <div className="bg-surface-card-dark border border-hairline-dark rounded-lg p-6 w-[360px] relative" onClick={e => e.stopPropagation()}>
+            <button onClick={() => setShowAlertModal(false)} className="absolute top-3 right-3 text-muted hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+            <h3 className="text-[16px] font-bold text-white mb-1">设置价格预警</h3>
+            <p className="text-[12px] text-muted mb-4">{stock.name} ({stock.marketCode}) · 现价 {stock.price.toFixed(2)}</p>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => setAlertType('price_above')} className={`py-2 rounded text-[13px] border transition-colors ${alertType === 'price_above' ? 'bg-trading-up/10 text-trading-up border-trading-up' : 'border-hairline-dark text-muted hover:text-white'}`}>涨破 (≥)</button>
+                <button onClick={() => setAlertType('price_below')} className={`py-2 rounded text-[13px] border transition-colors ${alertType === 'price_below' ? 'bg-trading-down/10 text-trading-down border-trading-down' : 'border-hairline-dark text-muted hover:text-white'}`}>跌破 (≤)</button>
+              </div>
+              <div>
+                <label className="text-[12px] text-muted mb-1 block">触发价格</label>
+                <input type="number" step="0.01" value={alertThreshold} onChange={e => setAlertThreshold(e.target.value)} className="w-full bg-canvas-dark border border-hairline-dark rounded px-3 py-2 text-[13px] text-white focus:outline-none focus:border-primary" />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <Button variant="secondary-on-dark" className="flex-1 border border-hairline-dark h-9" onClick={() => setShowAlertModal(false)}>取消</Button>
+              <Button className="flex-1 h-9" onClick={createAlert} disabled={alertSubmitting || !alertThreshold}>{alertSubmitting ? '设置中...' : '确认预警'}</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 预警设置成功提示 */}
+      {alertToast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-trading-up text-white px-4 py-2.5 rounded-lg shadow-lg text-[13px] flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
+          <Bell className="w-4 h-4" /> {alertToast}
+        </div>
+      )}
     </div>
   );
 }

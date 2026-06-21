@@ -3,11 +3,7 @@ import useSWR from "swr";
 import { StockData } from "../types";
 import StockDetails from "../components/StockDetails";
 import { Activity, ArrowLeft } from "lucide-react";
-
-const fetcher = (url: string) => fetch(url).then((res) => {
-  if (!res.ok) throw new Error("Failed to fetch");
-  return res.json();
-});
+import { fetcher } from "../lib/api";
 
 export default function StockDetail() {
   const { code } = useParams<{ code: string }>();
@@ -30,16 +26,17 @@ export default function StockDetail() {
   if (loading) {
     return (
       <div className="flex h-[400px] items-center justify-center">
-        <Activity className="w-8 h-8 text-blue-600 animate-spin" />
+        <Activity className="w-8 h-8 text-primary animate-spin" />
       </div>
     );
   }
 
+  // B4 修复：错误态使用深色主题令牌而非浅色
   if (error || !stock) {
     return (
-      <div className="bg-red-50 text-red-600 p-6 rounded-2xl flex flex-col items-center">
-        <p className="mb-4">Error: {error || "Stock not found"}</p>
-        <button onClick={() => navigate(-1)} className="flex items-center text-red-600 hover:text-red-800 font-bold">
+      <div className="bg-trading-down/10 text-trading-down p-6 rounded-lg flex flex-col items-center">
+        <p className="mb-4">错误: {error || "未找到该股票"}</p>
+        <button onClick={() => navigate(-1)} className="flex items-center text-trading-down hover:opacity-80 font-bold">
           <ArrowLeft className="w-4 h-4 mr-2" /> 返回
         </button>
       </div>

@@ -31,8 +31,9 @@
   --color-muted: #707a8a;
   --color-muted-strong: #929aa5;
   
-  --color-trading-up: #0ecb81;
-  --color-trading-down: #f6465d;
+  /* A股惯例：红涨绿跌（与K线图配色一致） */
+  --color-trading-up: #f6465d;   /* 红色 = 上涨 */
+  --color-trading-down: #0ecb81; /* 绿色 = 下跌 */
   --color-info: #3b82f6;
 
   /* 统一的圆角方案 (Unified Border Radius) */
@@ -48,4 +49,69 @@
   body {
     @apply bg-canvas-dark text-body-dark font-sans antialiased;
   }
+}
+
+/* ===================================================================
+ * 统一滚动条样式 (Unified Scrollbar)
+ * - 全局基础样式兜底所有滚动容器，避免出现操作系统原生滚动条
+ * - .custom-scrollbar 提供更紧凑的窄轨样式，适用于内嵌小区域
+ * - 同时兼容 WebKit/Chromium 与 Firefox
+ * =================================================================== */
+
+/* 全局兜底：所有滚动条统一为深色细轨 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-elevated-dark) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-surface-elevated-dark);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-muted);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 紧凑样式：内嵌小区域使用更窄的轨道与更低的对比度 */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-muted) 50%, transparent) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--color-muted) 50%, transparent);
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  background-clip: content-box;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-muted);
+  background-clip: content-box;
 }

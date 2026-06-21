@@ -1,0 +1,55 @@
+import http from 'node:http';
+import { getRequestListener } from '@hono/node-server';
+import { createServer as createViteServer } from 'vite';
+import app, { initSettings, pollAlerts } from './index.js';
+
+const port = Number(process.env.PORT) || 3000;
+
+// 本地开发服务器：单端口同时承载 Hono API 与 Vite SPA/HMR
+async function startServer() {
+  const vite = await createViteServer({
+    server: {
+      middlewareMode: true,
+      // 尊重 DISABLE_HMR 环境变量，避免 agent 编辑时的频繁刷新
+      hmr: process.env.DISABLE_HMR === 'true' ? false : { overlay: false },
+    },
+    appType: 'spa',
+  });
+
+  const honoListener = getRequestListener(app.fetch);
+
+  const server = http.createServer((req, res) => {
+    // /api 请求交由 Hono 处理，其余交给 Vite 中间件（SPA + 静态资源 + HMR）
+    if (req.url?.startsWith('/api')) {
+      honoListener(req, res);
+    } else {
+      vite.middlewares(req, res, () => {
+        res.statusCode = 404;
+        res.end();
+      });
+    }
+  });
+
+  // 初始化默认配置并启动本地告警轮询（生产环境由 Worker cron 触发）
+  await initSettings();
+  const alertTimer = setInterval(() => {
+    pollAlerts().catch((e) => console.error('Alert polling error:', e));
+  }, 60_000);
+
+  server.listen(port, () => {
+    console.log(`StockPulse dev server running at http://localhost:${port}`);
+  });
+
+  const shutdown = () => {
+    clearInterval(alertTimer);
+    server.close();
+    void vite.close();
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+startServer().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

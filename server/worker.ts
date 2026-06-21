@@ -1,9 +1,10 @@
-import app from './index.js';
+import app, { initSettings, initStockPool, pollAlerts } from './index.js';
 
 export default {
   fetch: app.fetch,
   async scheduled(event: any, env: any, ctx: any) {
-    // Background task logic
-    console.log("Scheduled event executed");
+    await initSettings(env);
+    await initStockPool(env);
+    await pollAlerts(env);
   }
 };

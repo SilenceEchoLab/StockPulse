@@ -1,24 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart, IChartApi, ISeriesApi, CrosshairMode, LineStyle, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
+import type { KlineData } from '../types';
 
-interface KlineData {
-  date: string;
-  open: number;
-  close: number;
-  high: number;
-  low: number;
-  volume: number;
-  macd?: number;
-  macdSignal?: number;
-  macdHist?: number;
-  rsi14?: number;
-  bollMid?: number;
-  bollUpper?: number;
-  bollLower?: number;
-  kdjK?: number;
-  kdjD?: number;
-  kdjJ?: number;
-}
+// D3 修复：KlineData 已统一至 types.ts，此处移除重复定义
 
 interface KLineChartProps {
   data: KlineData[];
@@ -37,9 +21,9 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
   useEffect(() => {
     if (!chartContainerRef.current || !indicatorContainerRef.current) return;
 
-    // Define colors mapped to our theme tokens
-    const colorUp = '#f23645'; // Up is RED
-    const colorDown = '#1bb154'; // Down is GREEN
+    // B2 修复：统一A股配色（红涨绿跌），与CSS令牌一致
+    const colorUp = '#f6465d';   // 红 = 涨（与 --color-trading-up 一致）
+    const colorDown = '#0ecb81'; // 绿 = 跌（与 --color-trading-down 一致）
     const colorBg = 'transparent';
     const colorGrid = '#232733'; // hairline-dark
     const colorText = '#787b86'; // muted
@@ -92,6 +76,12 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
     const bollMidSeries = chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 1, crosshairMarkerVisible: false });
     const bollUpperSeries = chart.addSeries(LineSeries, { color: colorUp, lineWidth: 1, lineStyle: LineStyle.Dotted, crosshairMarkerVisible: false });
     const bollLowerSeries = chart.addSeries(LineSeries, { color: colorDown, lineWidth: 1, lineStyle: LineStyle.Dotted, crosshairMarkerVisible: false });
+
+    // 均线系统 MA5/10/20/60 —— 趋势投资核心趋势判断
+    const ma5Series = chart.addSeries(LineSeries, { color: '#f5cb42', lineWidth: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false });
+    const ma10Series = chart.addSeries(LineSeries, { color: '#e879f9', lineWidth: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false });
+    const ma20Series = chart.addSeries(LineSeries, { color: '#22d3ee', lineWidth: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false });
+    const ma60Series = chart.addSeries(LineSeries, { color: '#a3a3a3', lineWidth: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false });
 
     // INDICATOR CHART
     const indicatorChart = createChart(indicatorContainerRef.current, {
@@ -166,7 +156,7 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
     
     syncCharts(chart.timeScale(), indicatorChart.timeScale());
 
-    seriesRef.current = { candleSeries, volumeSeries, bollMidSeries, bollUpperSeries, bollLowerSeries };
+    seriesRef.current = { candleSeries, volumeSeries, bollMidSeries, bollUpperSeries, bollLowerSeries, ma5Series, ma10Series, ma20Series, ma60Series };
     setMainChart(chart);
     setIndChart(indicatorChart);
 
@@ -208,7 +198,7 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
       color: d.close >= d.open ? 'rgba(242, 54, 69, 0.5)' : 'rgba(27, 177, 84, 0.5)',
     }));
 
-    const { candleSeries, volumeSeries, bollMidSeries, bollUpperSeries, bollLowerSeries } = seriesRef.current;
+    const { candleSeries, volumeSeries, bollMidSeries, bollUpperSeries, bollLowerSeries, ma5Series, ma10Series, ma20Series, ma60Series } = seriesRef.current;
     
     candleSeries?.setData(candleData);
     volumeSeries?.setData(volumeData);
@@ -216,6 +206,12 @@ export function KLineChart({ data, activeIndicator, period }: KLineChartProps) {
     bollMidSeries?.setData(formattedData.filter(d => d.bollMid != null).map(d => ({ time: d.time, value: d.bollMid })));
     bollUpperSeries?.setData(formattedData.filter(d => d.bollUpper != null).map(d => ({ time: d.time, value: d.bollUpper })));
     bollLowerSeries?.setData(formattedData.filter(d => d.bollLower != null).map(d => ({ time: d.time, value: d.bollLower })));
+
+    // 均线数据绑定
+    ma5Series?.setData(formattedData.filter(d => d.ma5 != null).map(d => ({ time: d.time, value: d.ma5 })));
+    ma10Series?.setData(formattedData.filter(d => d.ma10 != null).map(d => ({ time: d.time, value: d.ma10 })));
+    ma20Series?.setData(formattedData.filter(d => d.ma20 != null).map(d => ({ time: d.time, value: d.ma20 })));
+    ma60Series?.setData(formattedData.filter(d => d.ma60 != null).map(d => ({ time: d.time, value: d.ma60 })));
 
     // Update Indicator Chart
     // First clear existing series

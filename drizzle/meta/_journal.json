@@ -8,6 +8,13 @@
       "when": 1781776613914,
       "tag": "0000_mean_lizard",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1782051739232,
+      "tag": "0001_add_ma_bias_columns",
+      "breakpoints": true
     }
   ]
 }

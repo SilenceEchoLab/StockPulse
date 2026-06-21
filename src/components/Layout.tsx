@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { Outlet, Link, useLocation, useNavigate } from "react-router-dom";
 import { 
-  Star, Database, Settings, HelpCircle, 
+  Database, Settings,
   Search, Bell, Mail, User, Moon,
-  LineChart, Cpu, Activity, Briefcase, Globe, Newspaper,
-  Library, FileText, PieChart, Users, MessageSquare
+  Cpu, Activity, LayoutDashboard
 } from "lucide-react";
 import logoIcon from "../../assets/logo-icon.svg";
 import { cn } from "../lib/utils";
@@ -35,16 +34,21 @@ export default function Layout() {
     // Subscribe to SSE
     const eventSource = new EventSource('/api/alerts/stream');
     eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'alert_triggered' || data.type === 'notification') {
-        const notif = data.notification;
-        setNotifications(prev => [notif, ...prev]);
-        setUnreadCount(prev => prev + 1);
-        
-        // Browser native notification
-        if (Notification.permission === 'granted') {
-          new Notification(notif.title, { body: notif.content });
+      // B5 修复：JSON.parse 容错，心跳/非JSON帧不中断回调
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'alert_triggered' || data.type === 'notification') {
+          const notif = data.notification;
+          setNotifications(prev => [notif, ...prev]);
+          setUnreadCount(prev => prev + 1);
+          
+          // Browser native notification
+          if (Notification.permission === 'granted') {
+            new Notification(notif.title, { body: notif.content });
+          }
         }
+      } catch {
+        // 非 JSON 帧（如心跳），忽略
       }
     };
     
@@ -76,7 +80,7 @@ export default function Layout() {
     const timer = setTimeout(async () => {
       setIsSearching(true);
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+        const res = await fetch(`/api/pool/search?q=${encodeURIComponent(searchQuery)}`);
         if (res.ok) {
           const json = await res.json();
           setSearchResults(json.data || []);
@@ -94,7 +98,8 @@ export default function Layout() {
     {
       title: "核心功能",
       items: [
-        { name: "我的自选", path: "/pool", icon: Star },
+        { name: "投资大盘", path: "/", icon: LayoutDashboard },
+        { name: "核心股池", path: "/pool", icon: Database },
         { name: "AI选股", path: "/ai-picks", icon: Cpu },
         { name: "策略回测", path: "/backtest", icon: Activity },
       ]
@@ -102,7 +107,7 @@ export default function Layout() {
     {
       title: "数据与工具",
       items: [
-        { name: "数据控制台", path: "/", icon: Database },
+        { name: "数据控制台", path: "/sync", icon: Database },
       ]
     },
     {
@@ -114,7 +119,8 @@ export default function Layout() {
   ];
 
   const breadcrumbMap: Record<string, string> = {
-    '/': '数据控制台',
+    '/': '投资大盘',
+    '/sync': '数据控制台',
     '/pool': '我的自选',
     '/ai-picks': 'AI选股',
     '/backtest': '策略回测',
@@ -138,8 +144,7 @@ export default function Layout() {
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar py-4">
-          {navGroups.map((group, idx) => (
-            <div key={idx} className="mb-6">
+          {navGroups.map((group, idx) => (            <div key={idx} className="mb-6">
               <div className="px-5 mb-2 text-[12px] text-muted">{group.title}</div>
               <ul className="space-y-1">
                  {group.items.map((item) => {
@@ -218,7 +223,7 @@ export default function Layout() {
                
                {/* Search Dropdown */}
                {(searchResults.length > 0 || isSearching) && searchQuery.trim() && (
-                 <div className="absolute top-full left-0 right-0 mt-2 bg-surface-card-dark border border-hairline-dark rounded shadow-xl max-h-80 overflow-y-auto z-50">
+                 <div className="absolute top-full left-0 right-0 mt-2 bg-surface-card-dark border border-hairline-dark rounded shadow-xl max-h-80 overflow-y-auto custom-scrollbar z-50">
                    {isSearching && searchResults.length === 0 ? (
                      <div className="p-3 text-[12px] text-muted text-center">搜索中...</div>
                    ) : searchResults.length > 0 ? (
@@ -303,7 +308,7 @@ export default function Layout() {
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-canvas-dark p-4 relative">
+        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-canvas-dark p-4 relative custom-scrollbar">
            <Outlet />
         </main>
       </div>

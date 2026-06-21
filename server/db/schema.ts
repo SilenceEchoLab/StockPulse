@@ -42,8 +42,21 @@ export const klineDaily = sqliteTable('kline_daily', {
   kdjK: real('kdj_k'),
   kdjD: real('kdj_d'),
   kdjJ: real('kdj_j'),
+  // 均线系统 —— 趋势投资核心趋势判断
+  ma5: real('ma5'),
+  ma10: real('ma10'),
+  ma20: real('ma20'),
+  ma60: real('ma60'),
+  ma120: real('ma120'),
+  ma250: real('ma250'),
+  // 乖离率 —— 超买超卖量化
+  bias6: real('bias6'),
+  bias12: real('bias12'),
+  bias24: real('bias24'),
 }, (table) => ({
-  pk: primaryKey({ columns: [table.marketCode, table.date] })
+  pk: primaryKey({ columns: [table.marketCode, table.date] }),
+  // A1 修复：为按日期范围查询和排序添加索引
+  dateIdx: index('kline_daily_date_idx').on(table.date),
 }));
 
 export const klineMin = sqliteTable('kline_min', {
@@ -102,7 +115,10 @@ export const notifications = sqliteTable('notifications', {
   content: text('content').notNull(),
   isRead: integer('is_read', { mode: 'boolean' }).default(false),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
+}, (table) => ({
+  // A1 修复：按时间排序查询通知的索引
+  createdAtIdx: index('notifications_created_at_idx').on(table.createdAt),
+}));
 
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),

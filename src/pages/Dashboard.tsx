@@ -3,6 +3,7 @@ import { Play, Activity, Download, HardDrive, ShieldCheck, Database, RefreshCw, 
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
+import { exportToCSV } from "../lib/exportUtils";
 
 interface SyncState {
   status: "idle" | "syncing" | "completed" | "error";
@@ -93,6 +94,23 @@ export default function Dashboard() {
       await fetch("/api/sync/clean-cache", { method: "POST" });
       fetchOverview();
     } catch(e) {}
+  };
+
+  // 导出当前股票池实时行情为 CSV（复用前端 exportUtils，无需服务端打包）
+  const handleExport = async () => {
+    try {
+      const poolRes = await fetch('/api/pool');
+      if (!poolRes.ok) return;
+      const json = await poolRes.json();
+      const codes = (json.data || []).map((s: any) => s.marketCode);
+      if (codes.length === 0) { alert('股票池为空，无可导出数据'); return; }
+      const stocksRes = await fetch(`/api/stocks?codes=${codes.join(',')}`);
+      const stocksJson = await stocksRes.json();
+      exportToCSV(stocksJson.data || [], `StockPool_Export_${new Date().toISOString().slice(0, 10)}.csv`);
+    } catch (e) {
+      console.error('Export failed', e);
+      alert('导出失败，请检查网络或服务状态');
+    }
   };
 
   return (
@@ -308,16 +326,16 @@ export default function Dashboard() {
                   </Button>
                 </div>
              </Card>
-             <Card variant="card-dark" className="flex flex-col opacity-50 pointer-events-none">
+             <Card variant="card-dark" className="flex flex-col">
                 <h3 className="text-[14px] font-medium text-white mb-2 flex items-center">
-                  <Download className="w-4 h-4 mr-2 text-muted" /> 数据导出 (开发中)
+                  <Download className="w-4 h-4 mr-2 text-primary" /> 数据导出
                 </h3>
                 <p className="text-[13px] text-muted mb-6">
-                  将所有的系统设置、股票池、快照数据和本地缓存打包为 ZIP 供本地投研环境使用。
+                  导出当前股票池的实时行情快照（代码、名称、价格、涨跌幅、PE/PB、市值等）为 CSV，供本地投研环境使用。
                 </p>
                 <div className="mt-auto">
-                  <Button variant="outline" className="w-full text-muted border-hairline-dark">
-                    导出数据包
+                  <Button variant="outline" onClick={handleExport} className="w-full text-primary border-primary hover:bg-primary/10">
+                    导出行情 CSV
                   </Button>
                 </div>
              </Card>

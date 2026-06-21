@@ -1,17 +1,14 @@
 import { useState, useCallback, useEffect, useRef, type ChangeEvent, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { Trash2, Download, Activity, Star, Upload, FolderPlus } from "lucide-react";
+import { Trash2, Download, Activity, Star, Upload, FolderPlus, FolderInput, FolderMinus } from "lucide-react";
 import useSWR from "swr";
 import { StockData } from "../types";
 import { exportToCSV } from "../lib/exportUtils";
 import { cn } from "../lib/utils";
+import { fetcher } from "../lib/api";
 import { Button } from "../components/ui/Button";
 
-// 全局 Fetcher
-const fetcher = (url: string) => fetch(url).then((res) => {
-  if (!res.ok) throw new Error("Failed to fetch");
-  return res.json();
-});
+// 全局 Fetcher 已统一至 lib/api.ts（D2 修复）
 
 export default function StockPool() {
   const navigate = useNavigate();
@@ -56,6 +53,29 @@ export default function StockPool() {
     }
   }, [activeGroupId]);
 
+  const [groupPickerCode, setGroupPickerCode] = useState<string | null>(null);
+
+  // B10 修复：过滤条件变化时重置到第一页
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedIndustry, selectedView, searchTerm, activeGroupId]);
+
+  const addToGroup = async (groupId: number) => {
+    if (!groupPickerCode) return;
+    await fetch(`/api/groups/${groupId}/stocks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: groupPickerCode })
+    });
+    setGroupPickerCode(null);
+  };
+
+  const removeFromGroup = async (code: string) => {
+    if (activeGroupId === 'all') return;
+    await fetch(`/api/groups/${activeGroupId}/stocks/${code}`, { method: 'DELETE' });
+    fetchPool();
+  };
+
   useEffect(() => {
     fetchPool();
   }, [fetchPool]);
@@ -66,8 +86,8 @@ export default function StockPool() {
     codesQuery ? `/api/stocks?codes=${codesQuery}` : null,
     fetcher,
     {
-      refreshInterval: isAutoRefresh ? 15000 : 0, // Auto refresh every 15s
-      dedupingInterval: 5000,                     // Deduplicate identical requests within 5s
+      refreshInterval: isAutoRefresh ? 60000 : 0, // Auto refresh every 60s instead of 15s
+      dedupingInterval: 15000,                    // Deduplicate identical requests within 15s
       revalidateOnFocus: true,                    // Revalidate when window gets focus
     }
   );
@@ -183,7 +203,7 @@ export default function StockPool() {
 
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-3">
-             <span className="text-[12px] text-muted">自动刷新 (15s)</span>
+             <span className="text-[12px] text-muted">自动刷新 (60s)</span>
              <div 
                 className={`w-8 h-4 rounded-full relative cursor-pointer ${isAutoRefresh ? 'bg-primary' : 'bg-surface-elevated-dark'}`}
                 onClick={() => setIsAutoRefresh(!isAutoRefresh)}
@@ -295,9 +315,9 @@ export default function StockPool() {
         </div>
 
         <div className="flex items-center gap-2 text-[12px]">
-           <button className="px-3 py-1 rounded bg-primary text-ink font-medium">全部</button>
-           {['量化', '价值', '游资', '趋势', '打板'].map(tag => (
-             <button key={tag} className="px-3 py-1 rounded bg-canvas-dark text-muted border border-hairline-dark hover:text-white transition-colors">
+           <button onClick={() => setSelectedView('All')} className={`px-3 py-1 rounded font-medium transition-colors ${selectedView === 'All' ? 'bg-primary text-ink' : 'bg-canvas-dark text-muted border border-hairline-dark hover:text-white'}`}>全部</button>
+           {['量化', '价值', '游资', '趋势', '打板', '成长'].map(tag => (
+             <button key={tag} onClick={() => setSelectedView(tag)} className={`px-3 py-1 rounded transition-colors ${selectedView === tag ? 'bg-primary text-ink font-medium' : 'bg-canvas-dark text-muted border border-hairline-dark hover:text-white'}`}>
                {tag}
              </button>
            ))}
@@ -375,8 +395,25 @@ export default function StockPool() {
                   <td className="px-5 py-2.5 whitespace-nowrap text-center">
                     <div className="flex items-center justify-center gap-2">
                       <Star className="w-4 h-4 text-primary fill-primary" />
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); removeFromPool(stock.marketCode); }} 
+                      {activeGroupId === 'all' ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setGroupPickerCode(stock.marketCode); }}
+                          className="opacity-0 group-hover:opacity-100 text-muted hover:text-primary transition-all"
+                          title="加入分组"
+                        >
+                          <FolderInput className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); removeFromGroup(stock.marketCode); }}
+                          className="opacity-0 group-hover:opacity-100 text-muted hover:text-trading-down transition-all"
+                          title="移出该分组"
+                        >
+                          <FolderMinus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeFromPool(stock.marketCode); }}
                         className="opacity-0 group-hover:opacity-100 text-muted hover:text-trading-down transition-all"
                         title="删除自选"
                       >
@@ -415,6 +452,28 @@ export default function StockPool() {
           </div>
         </div>
       </div>
+
+      {/* 加入分组选择弹窗 */}
+      {groupPickerCode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setGroupPickerCode(null)}>
+          <div className="bg-surface-card-dark border border-hairline-dark rounded-lg p-6 w-[320px]" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-bold text-white mb-1">加入分组</h3>
+            <p className="text-[12px] text-muted mb-4 font-mono">{groupPickerCode}</p>
+            {groups.length === 0 ? (
+              <p className="text-[12px] text-muted text-center py-4">暂无分组，请先点击「新建分组」创建</p>
+            ) : (
+              <div className="space-y-1.5 max-h-[240px] overflow-y-auto custom-scrollbar">
+                {groups.map((g: any) => (
+                  <button key={g.id} onClick={() => addToGroup(g.id)} className="w-full text-left px-3 py-2 rounded bg-canvas-dark border border-hairline-dark hover:border-primary text-[13px] text-white transition-colors">
+                    {g.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Button variant="secondary-on-dark" className="w-full mt-4 border border-hairline-dark h-9" onClick={() => setGroupPickerCode(null)}>取消</Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
