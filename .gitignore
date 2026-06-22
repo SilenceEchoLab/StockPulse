@@ -15,3 +15,4 @@ data/
 # 书籍源文件（含 base64 图片，体积过大）
 docs/趋势投资.md
 docs/趋势投资.docx
+.claude/
