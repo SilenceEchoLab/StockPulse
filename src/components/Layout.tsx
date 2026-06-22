@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Outlet, Link, useLocation, useNavigate } from "react-router-dom";
-import { 
-  Database, Settings,
+import {
+  Database, Settings, FlaskConical,
   Search, Bell, Mail, User, Moon,
   Cpu, Activity, LayoutDashboard
 } from "lucide-react";
@@ -102,6 +102,7 @@ export default function Layout() {
         { name: "核心股池", path: "/pool", icon: Database },
         { name: "AI选股", path: "/ai-picks", icon: Cpu },
         { name: "策略回测", path: "/backtest", icon: Activity },
+        { name: "AutoResearch", path: "/research", icon: FlaskConical },
       ]
     },
     {
@@ -124,6 +125,7 @@ export default function Layout() {
     '/pool': '我的自选',
     '/ai-picks': 'AI选股',
     '/backtest': '策略回测',
+    '/research': 'AutoResearch 自动优化引擎',
     '/settings': '⚙️ AI 设置',
   };
 

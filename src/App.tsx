@@ -10,6 +10,7 @@ const StockPool = lazy(() => import("./pages/StockPool"));
 const StockDetail = lazy(() => import("./pages/StockDetail"));
 const AiPicks = lazy(() => import("./pages/AiPicks"));
 const Backtest = lazy(() => import("./pages/Backtest"));
+const AutoResearch = lazy(() => import("./pages/AutoResearch"));
 const Settings = lazy(() => import("./pages/Settings"));
 
 const PageFallback = () => (
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="pool/:code" element={<Suspense fallback={<PageFallback />}><ErrorBoundary><StockDetail /></ErrorBoundary></Suspense>} />
           <Route path="ai-picks" element={<Suspense fallback={<PageFallback />}><AiPicks /></Suspense>} />
           <Route path="backtest" element={<Suspense fallback={<PageFallback />}><ErrorBoundary><Backtest /></ErrorBoundary></Suspense>} />
+          <Route path="research" element={<Suspense fallback={<PageFallback />}><ErrorBoundary><AutoResearch /></ErrorBoundary></Suspense>} />
           <Route path="settings" element={<Suspense fallback={<PageFallback />}><Settings /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

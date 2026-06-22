@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { getTencentStockData } from './lib/tencent.js';
 import { alertClients } from './lib/state.js';
 import { writeAuthMiddleware } from './lib/auth.js';
-import { DEFAULT_PICKS_PROMPT, DEFAULT_SENTIMENT_PROMPT } from './routes/ai.js';
+import { DEFAULT_PICKS_PROMPT, DEFAULT_SENTIMENT_PROMPT, DEFAULT_REVIEW_PROMPT } from './routes/ai.js';
 
 import poolRoutes from './routes/pool.js';
 import groupsRoutes from './routes/groups.js';
@@ -18,6 +18,7 @@ import notificationsRoutes from './routes/notifications.js';
 import marketRoutes from './routes/market.js';
 import settingsRoutes from './routes/settings.js';
 import backtestRoutes from './routes/backtest.js';
+import researchRoutes from './routes/research.js';
 
 const app = new Hono();
 
@@ -41,6 +42,7 @@ app.route('/api/notifications', notificationsRoutes);
 app.route('/api/market', marketRoutes);
 app.route('/api/settings', settingsRoutes);
 app.route('/api/backtest', backtestRoutes);
+app.route('/api/research', researchRoutes);
 
 async function initSettings(env?: any) {
   const db = getDb(env ? { env } : undefined);
@@ -51,6 +53,10 @@ async function initSettings(env?: any) {
   const existingPicks = await db.select().from(settings).where(eq(settings.key, 'ai_picks_prompt')).get();
   if (!existingPicks) {
     await db.insert(settings).values({ key: 'ai_picks_prompt', value: DEFAULT_PICKS_PROMPT }).run();
+  }
+  const existingReview = await db.select().from(settings).where(eq(settings.key, 'ai_review_prompt')).get();
+  if (!existingReview) {
+    await db.insert(settings).values({ key: 'ai_review_prompt', value: DEFAULT_REVIEW_PROMPT }).run();
   }
 }
 

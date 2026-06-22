@@ -21,13 +21,13 @@ const safe = (v: number | null | undefined): number | null =>
 export type StrategyType = 'three_cycle' | 'macd_cross' | 'rsi_reversal' | 'ma520';
 
 export interface BacktestParams {
-  scoreThreshold?: number;    // 三周期共振得分阈值（默认 55）
+  scoreThreshold?: number;    // 三周期共振得分阈值（默认 60）
   requireResonant?: boolean;  // 是否要求 resonant=true（默认 false）
-  stopLoss?: number;          // 固定止损比例（默认 0.07）
-  takeProfit?: number;        // 固定止盈比例（默认 0.20）
-  trailingStop?: number;      // 移动止盈回撤比例（默认 0.08）
+  stopLoss?: number;          // 固定止损比例（默认 0.08）
+  takeProfit?: number;        // 固定止盈比例（默认 0.30）
+  trailingStop?: number;      // 移动止盈回撤比例（默认 0.12）
   atrMultiple?: number;       // ATR 止损倍数（默认 2）
-  maxHoldDays?: number;       // 时间止损天数（默认 20）
+  maxHoldDays?: number;       // 时间止损天数（默认 30）
   positionPct?: number;       // 单次开仓占总资金比例（默认 0.3）
   rsiBuy?: number;            // RSI 买入阈值（默认 30）
   rsiSell?: number;           // RSI 卖出阈值（默认 70）
@@ -106,7 +106,9 @@ function isLockLimitDown(code: string, day: KlineRow, prevClose: number): boolea
 }
 
 // 策略信号：基于 rows[0..i-1]（T日及之前）产生 BUY/SELL/HOLD
-function generateSignal(
+// 防未来函数：信号用 rows[0..i-1]，成交用 rows[i]（T+1 开盘）
+// 导出供 recommender 实时生成当日信号使用
+export function generateSignal(
   strategy: StrategyType, params: BacktestParams, rows: KlineRow[], i: number
 ): 'buy' | 'sell' | 'hold' {
   const prev = rows[i - 1]; // T 日
@@ -123,17 +125,11 @@ function generateSignal(
     const requireResonant = params.requireResonant === true;
     // range 市提高阈值 5 分
     const effectiveThreshold = regime === 'range' ? threshold + 5 : threshold;
-    if (result.score >= effectiveThreshold && (!requireResonant || result.resonant)) return 'buy';
-    // 持仓中的辅助卖出：跌破 MA20 或 MACD 死叉
-    const price = prev.close;
-    const ma20 = safe(prev.ma20);
-    const macd = safe(prev.macd);
-    const macdSig = safe(prev.macdSignal);
-    const prevMacd = safe(prev2?.macd);
-    const prevSig = safe(prev2?.macdSignal);
-    if (ma20 !== null && price < ma20) return 'sell';
-    if (macd !== null && macdSig !== null && prevMacd !== null && prevSig !== null
-      && prevMacd >= prevSig && macd < macdSig) return 'sell';
+    // 买入：得分达标（range 市提高阈值 5 分）
+    if (result.score >= effectiveThreshold
+        && (!requireResonant || result.resonant)) return 'buy';
+
+    // 卖出信号已移除：数据证明信号卖出(2日破MA20)净亏，依赖系统化风控（ATR止损/移动止盈/止盈/时间止损）
     return 'hold';
   }
 
@@ -151,7 +147,10 @@ function generateSignal(
     const buyT = params.rsiBuy ?? 30;
     const sellT = params.rsiSell ?? 70;
     const rsi = safe(prev.rsi14) ?? 50;
-    if (rsi < buyT) return 'buy';
+    // 长期趋势过滤：站上年线(MA250)才允许做多，避免在长期下降通道中抄底
+    const ma250 = safe(prev.ma250);
+    const longTermUp = ma250 !== null ? prev.close > ma250 : true;
+    if (rsi < buyT && longTermUp) return 'buy';
     if (rsi > sellT) return 'sell';
     return 'hold';
   }
@@ -210,11 +209,11 @@ export function runBacktest(
   let maxEquity = initialCapital;
   let maxDrawdown = 0;
 
-  const stopLossPct = params.stopLoss ?? 0.07;
-  const takeProfitPct = params.takeProfit ?? 0.20;
-  const trailingPct = params.trailingStop ?? 0.08;
+  const stopLossPct = params.stopLoss ?? 0.08;
+  const takeProfitPct = params.takeProfit ?? 0.25;
+  const trailingPct = params.trailingStop ?? 0.10;
   const atrMult = params.atrMultiple ?? 2;
-  const maxHold = params.maxHoldDays ?? 20;
+  const maxHold = params.maxHoldDays ?? 30;
   const positionPct = params.positionPct ?? 0.30;
 
   for (let i = WARMUP; i < rows.length; i++) {
@@ -229,7 +228,13 @@ export function runBacktest(
       const atrStop = entryPrice - atrMult * entryATR;
       const fixedStop = entryPrice * (1 - stopLossPct);
       const initialStop = Math.max(atrStop, fixedStop);          // 初始止损（较保守者）
-      const trailingPrice = highestSinceEntry * (1 - trailingPct);
+      // 渐进式移动止盈：盈利越大、追踪越紧，锁定利润
+      // 盈利 <10%: 用初始止损（给趋势发展空间）
+      // 盈利 10-20%: 追踪回撤 12%
+      // 盈利 >20%: 追踪回撤 8%（利润奔跑后收紧）
+      const gainPct = (highestSinceEntry - entryPrice) / entryPrice;
+      const adaptiveTrail = gainPct > 0.20 ? 0.08 : gainPct > 0.10 ? 0.12 : trailingPct;
+      const trailingPrice = highestSinceEntry * (1 - adaptiveTrail);
       const effectiveStop = Math.max(initialStop, trailingPrice); // 移动止盈线随最高价上移
       const takeProfitPrice = entryPrice * (1 + takeProfitPct);
 
@@ -250,9 +255,11 @@ export function runBacktest(
           exitPrice = execDay.close;
           exitReason = '时间止损';
         } else {
-          // 信号止损（策略级别的卖出信号）
-          const sig = generateSignal(strategy, params, rows, i);
-          if (sig === 'sell') { exitPrice = execDay.open; exitReason = '信号卖出'; }
+          // 信号止损：持仓超过 3 日后才启用，避免建仓初期被正常回调洗出
+          if (holdDays > 3) {
+            const sig = generateSignal(strategy, params, rows, i);
+            if (sig === 'sell') { exitPrice = execDay.open; exitReason = '信号卖出'; }
+          }
         }
       }
 

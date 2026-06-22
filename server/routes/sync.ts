@@ -12,6 +12,8 @@ const app = new Hono();
 const FULL_HISTORY_DAYS = 800;
 // 增量同步默认窗口（近期补数）
 const INCREMENTAL_DAYS = 30;
+// 指标预热所需最小数据量：MA250 需 250+ 日，MACD(26)/BIAS24 等也需充足窗口
+const INDICATOR_WARMUP_DAYS = 300;
 
 // 指数代码（沪深300/上证/深成/创业板）—— 与 market.ts 的 INDICES 保持一致，存入同一张 kline_daily
 export const INDEX_CODES = ['sh000300', 'sh000001', 'sz399001', 'sz399006'];
@@ -26,8 +28,9 @@ export async function syncOneStock(code: string, db: any, options: { mode?: stri
   const mode = options.mode || 'incremental';
   const isIndex = isIndexCode(code);
 
-  // 动态决定拉取天数：full 拉满历史；incremental 根据已有最新日期智能补数
-  let days = options.days || (mode === 'full' ? FULL_HISTORY_DAYS : INCREMENTAL_DAYS);
+  // 动态决定拉取天数：full 拉满历史；incremental 需保证指标预热数据量
+  // 否则 calculateIndicators 在 len<35 时返回全 null，导致近期行指标缺失
+  let days = options.days || (mode === 'full' ? FULL_HISTORY_DAYS : Math.max(INCREMENTAL_DAYS, INDICATOR_WARMUP_DAYS));
 
   // 日K线：腾讯 fqkline 接口对个股与指数均要求带 qfq 后缀（指数无复权语义但接口必需）
   const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${code},day,,,${days},qfq`;
@@ -65,6 +68,9 @@ export async function syncOneStock(code: string, db: any, options: { mode?: stri
     const close = parseFloat(row[2]);
     const high = parseFloat(row[3]);
     const low = parseFloat(row[4]);
+    // OHLC 为 NOT NULL 列：停牌/异常行可能返回空串，parseFloat 得 NaN，
+    // 经 JSON 序列化变 null 会违反约束导致整批 upsert 失败，跳过无效行
+    if (!isFinite(open) || !isFinite(close) || !isFinite(high) || !isFinite(low)) continue;
     const volume = parseFloat(row[5]) || 0;
     closePrices.push(close);
     highPrices.push(high);
@@ -199,7 +205,8 @@ export async function syncOneStock(code: string, db: any, options: { mode?: stri
             high: parseFloat(row[3]),
             low: parseFloat(row[4]),
             volume: parseFloat(row[5])
-          }));
+          // 过滤 OHLC 无效行（停牌/异常），避免 NOT NULL 约束失败
+          })).filter((r: any) => isFinite(r.open) && isFinite(r.close) && isFinite(r.high) && isFinite(r.low));
 
           const latestMin = await db.select({ time: klineMin.time })
             .from(klineMin)
@@ -281,7 +288,10 @@ async function runScraper(codes: string[], c: any, options: { concurrency?: numb
             await syncOneStock(code, db, { mode, days: options.days });
           } catch (err: any) {
             syncProcess.errorCount++;
-            addLog('ERROR', 'API_ERROR:', `Failed for ${code} - ${err.message || err.toString()}`);
+            // DrizzleQueryError 把真正的 SQLite 错误放在 cause 里，只 log message 会丢失根因
+            const rootCause = err?.cause?.message || err?.cause || '';
+            const msg = rootCause ? `${err.message} | cause: ${rootCause}` : (err.message || err.toString());
+            addLog('ERROR', 'API_ERROR:', `Failed for ${code} - ${msg}`);
           }
 
           // 随机延迟，降低被限流风险

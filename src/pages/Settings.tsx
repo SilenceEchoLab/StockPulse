@@ -8,6 +8,7 @@ export default function Settings() {
     ai_model: '',
     ai_sentiment_prompt: '',
     ai_picks_prompt: '',
+    ai_review_prompt: '',
   });
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
@@ -23,6 +24,7 @@ export default function Settings() {
             ai_model: d.data.ai_model || '',
             ai_sentiment_prompt: d.data.ai_sentiment_prompt || '',
             ai_picks_prompt: d.data.ai_picks_prompt || '',
+            ai_review_prompt: d.data.ai_review_prompt || '',
           });
         }
       });
@@ -139,6 +141,22 @@ export default function Settings() {
             />
             <p className="text-xs text-muted mt-2">
               覆盖默认多因子选股提示词。请务必确保返回系统约定的 JSON 结构 (包含 picks 数组)。可以使用 {'{{strategy}}'} 和 {'{{count}}'} 占位符。
+            </p>
+          </div>
+
+          <div>
+            <label className="flex items-center text-sm font-medium text-body-dark mb-2">
+              复盘教练提示词 (可选)
+            </label>
+            <textarea
+              value={config.ai_review_prompt}
+              onChange={(e) => setConfig({ ...config, ai_review_prompt: e.target.value })}
+              placeholder="留空则使用默认系统提示词..."
+              rows={6}
+              className="w-full bg-canvas-dark border border-hairline-dark rounded-lg px-4 py-2 text-white placeholder:text-muted focus:outline-none focus:border-primary transition-colors resize-none"
+            />
+            <p className="text-xs text-muted mt-2">
+              复盘教练 AI 角色：分析历史推荐的盈亏，提炼可执行的策略优化建议，驱动 AutoResearch 闭环。
             </p>
           </div>
         </div>

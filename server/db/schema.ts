@@ -132,3 +132,66 @@ export const settings = sqliteTable('settings', {
   value: text('value').notNull(),
 });
 
+// ═══ AutoResearch: 策略自动优化引擎 ═══
+
+// 优化运行历史 —— 每次批量优化的元数据
+export const researchRuns = sqliteTable('research_runs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  strategy: text('strategy').notNull(),
+  status: text('status').notNull(), // running | completed | failed
+  stocksOptimized: integer('stocks_optimized').default(0),
+  stocksProfitable: integer('stocks_profitable').default(0),
+  bestCompositeScore: real('best_composite_score'),
+  avgTrainReturn: real('avg_train_return'),
+  avgTestReturn: real('avg_test_return'),
+  startedAt: integer('started_at', { mode: 'timestamp' }).notNull(),
+  completedAt: integer('completed_at', { mode: 'timestamp' }),
+}, (table) => ({
+  strategyIdx: index('research_runs_strategy_idx').on(table.strategy),
+}));
+
+// 每只股票每个策略的最优参数 —— walk-forward 验证后的结果
+export const strategyOptima = sqliteTable('strategy_optima', {
+  marketCode: text('market_code').notNull(),
+  strategy: text('strategy').notNull(),
+  paramsJson: text('params_json').notNull(),
+  trainSharpe: real('train_sharpe'),
+  testSharpe: real('test_sharpe'),
+  trainReturn: real('train_return'),
+  testReturn: real('test_return'),
+  trainWinRate: real('train_win_rate'),
+  testWinRate: real('test_win_rate'),
+  maxDrawdown: real('max_drawdown'),
+  compositeScore: real('composite_score'),
+  overfitScore: real('overfit_score'), // |train-test| / max(|train|,|test|)，越低越稳定
+  tradeCount: integer('trade_count').default(0),
+  validatedAt: integer('validated_at', { mode: 'timestamp' }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.marketCode, table.strategy] }),
+  scoreIdx: index('strategy_optima_score_idx').on(table.compositeScore),
+}));
+
+// 每日买卖推荐 —— 多策略共识产生的可执行信号
+export const recommendations = sqliteTable('recommendations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  date: text('date').notNull(),
+  marketCode: text('market_code').notNull(),
+  action: text('action').notNull(), // buy | sell | hold
+  strategy: text('strategy').notNull(), // 策略名或 'consensus'
+  confidence: real('confidence').notNull(),
+  entryPrice: real('entry_price'),
+  stopLoss: real('stop_loss'),
+  takeProfit: real('take_profit'),
+  reason: text('reason'),
+  status: text('status').default('active'), // active | hit_tp | hit_sl | expired | closed
+  resolvedAt: integer('resolved_at', { mode: 'timestamp' }),
+  resolvedPrice: real('resolved_price'),
+  returnPct: real('return_pct'),
+  holdDays: integer('hold_days'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+}, (table) => ({
+  dateIdx: index('recommendations_date_idx').on(table.date),
+  codeIdx: index('recommendations_code_idx').on(table.marketCode),
+  statusIdx: index('recommendations_status_idx').on(table.status),
+}));
+
