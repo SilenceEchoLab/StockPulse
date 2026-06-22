@@ -192,8 +192,12 @@ export default function Dashboard() {
                        </div>
                      </div>
                    )}
-                   {syncState.status === "completed" && (
+                   {(syncState.status === "completed" || syncState.status === "error") && (
                       <div className="space-y-2">
+                        <Button onClick={startHistoricalSync} className="w-full h-10">
+                          <Play className="w-4 h-4 mr-2" />
+                          重新同步
+                        </Button>
                         <Button variant="outline" className="w-full h-10 text-primary border-primary hover:bg-primary/10" onClick={() => setActiveTab(1)}>
                           查看执行日志
                         </Button>

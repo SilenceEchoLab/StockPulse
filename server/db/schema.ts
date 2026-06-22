@@ -53,10 +53,17 @@ export const klineDaily = sqliteTable('kline_daily', {
   bias6: real('bias6'),
   bias12: real('bias12'),
   bias24: real('bias24'),
+  // 风控与资金流指标（指数与个股共用本表，指数代码作为 marketCode）
+  atr14: real('atr14'),      // 14日真实波动幅度 —— 止损位 = 1.5~2 倍 ATR
+  obv: real('obv'),          // OBV 能量潮 —— 量价背离判断主力进出
+  volMa5: real('vol_ma5'),   // 5日成交量均量
+  volRatio: real('vol_ratio'), // 量比 = 当日量 / 5日均量
+  pctChg: real('pct_chg'),   // 当日涨跌幅(%) —— 涨跌停判定与宽度统计
 }, (table) => ({
   pk: primaryKey({ columns: [table.marketCode, table.date] }),
   // A1 修复：为按日期范围查询和排序添加索引
   dateIdx: index('kline_daily_date_idx').on(table.date),
+  marketIdx: index('kline_daily_market_idx').on(table.marketCode),
 }));
 
 export const klineMin = sqliteTable('kline_min', {

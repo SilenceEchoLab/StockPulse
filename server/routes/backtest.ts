@@ -1,27 +1,58 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
 import { klineDaily } from '../db/schema.js';
-import { and, gte, lte, asc, inArray } from 'drizzle-orm';
+import { and, gte, lte, asc, inArray, eq } from 'drizzle-orm';
+import { runBacktest, type StrategyType, type BacktestConfig } from '../lib/backtestEngine.js';
+import { assessMarketTiming, type Regime } from '../lib/marketTiming.js';
 
 const app = new Hono();
 
+const BUY_FEE = 0.0003;
+const SELL_FEE = 0.0013;
+
+const VALID_STRATEGIES: StrategyType[] = ['three_cycle', 'macd_cross', 'rsi_reversal', 'ma520'];
+
 app.post('/run', async (c) => {
   try {
-    const { codes, strategy, startDate, endDate, initialCapital = 100000 } = (await c.req.json()) as any;
-    if (!codes || codes.length === 0) return c.json({ error: 'Missing codes' }, 400);
-    if (!strategy || !strategy.type) return c.json({ error: 'Missing strategy' }, 400);
+    const body = await c.req.json();
+    const {
+      codes, strategy = 'three_cycle', startDate, endDate,
+      initialCapital = 100000, params = {},
+      benchmarkCode = 'sh000300', useMarketTiming = false,
+    } = body;
 
-    let klines: any[] = [];
-    const chunkSize = 50;
+    if (!codes || codes.length === 0) return c.json({ error: 'Missing codes' }, 400);
+    if (!VALID_STRATEGIES.includes(strategy)) {
+      return c.json({ error: `Invalid strategy. Must be one of: ${VALID_STRATEGIES.join(', ')}` }, 400);
+    }
+
     const db = getDb(c);
-    
-    for (let i = 0; i < codes.length; i += chunkSize) {
-      const chunk = codes.slice(i, i + chunkSize);
-      let chunkConditions: any[] = [inArray(klineDaily.marketCode, chunk)];
-      if (startDate) chunkConditions.push(gte(klineDaily.date, startDate));
-      if (endDate) chunkConditions.push(lte(klineDaily.date, endDate));
-      const chunkKlines = await db.select().from(klineDaily).where(and(...chunkConditions)).orderBy(asc(klineDaily.date)).all();
-      klines.push(...chunkKlines);
+
+    // 读取大盘数据（用于择时和基准）
+    const idxRows = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, benchmarkCode))
+      .orderBy(asc(klineDaily.date)).all() as any[];
+
+    // 大盘择时
+    let marketRegime: Regime | undefined;
+    let maxPosition = 1.0;
+    if (useMarketTiming && strategy === 'three_cycle') {
+      const timing = assessMarketTiming(idxRows, benchmarkCode);
+      marketRegime = timing.regime;
+      maxPosition = timing.maxPosition;
+    }
+
+    // 读取股票数据
+    const allCodes = [...new Set([...codes, benchmarkCode])];
+    const chunkSize = 50;
+    let klines: any[] = [];
+    for (let i = 0; i < allCodes.length; i += chunkSize) {
+      const chunk = allCodes.slice(i, i + chunkSize);
+      const conditions: any[] = [inArray(klineDaily.marketCode, chunk)];
+      if (startDate) conditions.push(gte(klineDaily.date, startDate));
+      if (endDate) conditions.push(lte(klineDaily.date, endDate));
+      const rows = await db.select().from(klineDaily).where(and(...conditions)).orderBy(asc(klineDaily.date)).all();
+      klines.push(...rows);
     }
 
     const dataByCode = klines.reduce((acc: any, curr) => {
@@ -30,139 +61,52 @@ app.post('/run', async (c) => {
       return acc;
     }, {});
 
-    // A4 修复：抽取回测计算为函数，支持并行
-    const BUY_FEE_RATE = 0.0003;
-    const SELL_FEE_RATE = 0.0013;
-    const RISK_FREE_RATE = 0.02;
+    const benchmark = dataByCode[benchmarkCode] || [];
 
-    const computeBacktest = (code: string): any | null => {
-      const data = dataByCode[code] || [];
-      if (data.length === 0) return null;
+    // 为每只股票运行回测
+    const results = codes.map((code: string) => {
+      const rows = dataByCode[code];
+      if (!rows || rows.length < 72) return null;
 
-      let cash = initialCapital;
-      let position = 0;
-      let trades: any[] = [];
-      let equityCurve: any[] = [];
-      let dailyReturns: number[] = [];
-      let previousEquity = initialCapital;
-      let winningTrades = 0;
-      let maxEquity = initialCapital;
-      let maxDrawdown = 0;
+      const config: BacktestConfig = {
+        strategy,
+        params: {
+          ...params,
+          positionPct: useMarketTiming ? maxPosition : (params.positionPct ?? 1.0),
+          marketRegime,
+        },
+        fees: { buy: BUY_FEE, sell: SELL_FEE },
+        slippage: 0.001,
+        initialCapital,
+      };
 
-      for (let i = 1; i < data.length; i++) {
-        const prev = data[i - 1];
-        const curr = data[i];
-        let signal = 0;
+      const result = runBacktest(rows, config, benchmark);
 
-        if (strategy.type === 'macd_cross') {
-          const prevMacd = prev.macd || 0;
-          const prevSig = prev.macdSignal || 0;
-          const currMacd = curr.macd || 0;
-          const currSig = curr.macdSignal || 0;
-          if (prevMacd <= prevSig && currMacd > currSig) signal = 1;
-          else if (prevMacd >= prevSig && currMacd < currSig) signal = -1;
-        } else if (strategy.type === 'rsi_overbought') {
-          const buyT = strategy.params?.rsiBuy || 30;
-          const sellT = strategy.params?.rsiSell || 70;
-          if ((curr.rsi14 || 50) < buyT) signal = 1;
-          else if ((curr.rsi14 || 50) > sellT) signal = -1;
-        }
-
-        if (signal === 1 && position === 0) {
-          const maxAffordableCost = curr.close * (1 + BUY_FEE_RATE);
-          const shares = Math.floor(cash / maxAffordableCost);
-          if (shares > 0) {
-            position = shares;
-            const tradeCost = shares * curr.close * (1 + BUY_FEE_RATE);
-            cash -= tradeCost;
-            trades.push({ type: 'buy', date: curr.date, price: curr.close, shares, fee: tradeCost - shares * curr.close });
-          }
-        } else if (signal === -1 && position > 0) {
-          const grossValue = position * curr.close;
-          const sellFee = grossValue * SELL_FEE_RATE;
-          const netValue = grossValue - sellFee;
-          cash += netValue;
-
-          const lastBuy = trades.filter(t => t.type === 'buy').pop();
-          let profit: number | undefined;
-          if (lastBuy) {
-            const buyCost = lastBuy.shares * lastBuy.price * (1 + BUY_FEE_RATE);
-            profit = (netValue - buyCost) / buyCost;
-            if (netValue > buyCost) winningTrades++;
-          }
-          trades.push({ type: 'sell', date: curr.date, price: curr.close, shares: position, fee: sellFee, profit });
-          position = 0;
-        }
-
-        const equity = cash + (position * curr.close);
-        equityCurve.push({ date: curr.date, equity });
-        const dailyReturn = (equity - previousEquity) / previousEquity;
-        dailyReturns.push(dailyReturn);
-        previousEquity = equity;
-        
-        if (equity > maxEquity) maxEquity = equity;
-        const drawdown = (maxEquity > 0) ? ((maxEquity - equity) / maxEquity) : 0;
-        if (drawdown > maxDrawdown) maxDrawdown = drawdown;
-      }
-
-      if (position > 0) {
-        const lastPrice = data[data.length - 1].close;
-        const grossValue = position * lastPrice;
-        const sellFee = grossValue * SELL_FEE_RATE;
-        const netValue = grossValue - sellFee;
-        cash += netValue;
-
-        const lastBuy = trades.filter(t => t.type === 'buy').pop();
-        let profit: number | undefined;
-        if (lastBuy) {
-          const buyCost = lastBuy.shares * lastBuy.price * (1 + BUY_FEE_RATE);
-          profit = (netValue - buyCost) / buyCost;
-          if (netValue > buyCost) winningTrades++;
-        }
-        trades.push({ type: 'sell', date: data[data.length - 1].date, price: lastPrice, shares: position, fee: sellFee, profit });
-        if (equityCurve.length > 0) {
-          equityCurve[equityCurve.length - 1].equity = cash;
-        }
-      }
-
-      const totalReturn = (cash - initialCapital) / initialCapital;
-      const totalTrades = trades.filter(t => t.type === 'sell').length;
-      const winRate = totalTrades > 0 ? winningTrades / totalTrades : 0;
-      const years = data.length / 252;
-      const annualizedReturn = years > 0 ? (Math.pow(1 + totalReturn, 1 / years) - 1) : 0;
-
-      let sharpeRatio = 0;
-      if (dailyReturns.length > 0) {
-        const meanReturn = dailyReturns.reduce((sum, r) => sum + r, 0) / dailyReturns.length;
-        const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / (dailyReturns.length - 1 || 1);
-        const stdDev = Math.sqrt(variance);
-        const annualizedVolatility = stdDev * Math.sqrt(252);
-        if (annualizedVolatility > 0) {
-          sharpeRatio = (annualizedReturn - RISK_FREE_RATE) / annualizedVolatility;
-        }
-      }
-
-      // A4 修复：trades 限制最近 50 笔，equityCurve 降采样到最多 200 点
-      const recentTrades = trades.slice(-50);
+      // 节省传输：只返回最近 50 笔，曲线降采样到 200 点
+      const recentTrades = result.trades.slice(-50);
       const maxCurvePoints = 200;
-      const sampledCurve = equityCurve.length > maxCurvePoints
-        ? equityCurve.filter((_, idx) => idx % Math.ceil(equityCurve.length / maxCurvePoints) === 0)
-        : equityCurve;
+      const curve = result.equityCurve;
+      const sampledCurve = curve.length > maxCurvePoints
+        ? curve.filter((_, idx) => idx % Math.ceil(curve.length / maxCurvePoints) === 0)
+        : curve;
 
       return {
         marketCode: code,
-        metrics: { totalReturn, annualizedReturn, maxDrawdown, winRate, trades: totalTrades, sharpeRatio, finalCapital: cash },
+        metrics: result.metrics,
         trades: recentTrades,
-        equityCurve: sampledCurve
+        equityCurve: sampledCurve,
       };
-    };
+    }).filter(Boolean);
 
-    // A4 修复：并行计算每只股票的回测
-    const results = codes.map(code => computeBacktest(code)).filter(r => r !== null) as any[];
-
-    return c.json({ success: true, results });
+    return c.json({
+      success: true,
+      strategy,
+      marketTiming: useMarketTiming ? { regime: marketRegime, maxPosition } : null,
+      results,
+    });
   } catch (e: any) {
-    return c.json({ error: 'Internal error' }, 500);
+    console.error('[Backtest] Error:', e.message);
+    return c.json({ error: e.message || 'Internal error' }, 500);
   }
 });
 

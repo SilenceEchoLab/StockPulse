@@ -110,8 +110,10 @@ app.get('/:code', async (c) => {
     const closePrices = parsedData.map((d: any) => d.close);
     const highPrices = parsedData.map((d: any) => d.high);
     const lowPrices = parsedData.map((d: any) => d.low);
+    const volumePrices = parsedData.map((d: any) => d.volume ?? 0);
 
-    const { pMacd, pRsi, pBb, pKdj, pMa, pBias } = calculateIndicators(closePrices, highPrices, lowPrices);
+    const { pMacd, pRsi, pBb, pKdj, pMa, pBias, pAtr, pObv, pVolMa5, pVolRatio } =
+      calculateIndicators(closePrices, highPrices, lowPrices, volumePrices);
 
     const finalData = parsedData.map((r: any, i: number) => {
       const j = (pKdj[i] && pKdj[i].k !== null) ? 3 * pKdj[i].k - 2 * pKdj[i].d : null;
@@ -136,6 +138,10 @@ app.get('/:code', async (c) => {
         bias6: pBias.bias6[i] ?? null,
         bias12: pBias.bias12[i] ?? null,
         bias24: pBias.bias24[i] ?? null,
+        atr14: pAtr[i] ?? null,
+        obv: pObv[i] ?? null,
+        volMa5: pVolMa5[i] ?? null,
+        volRatio: pVolRatio[i] ?? null,
       };
     });
 

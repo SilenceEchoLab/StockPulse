@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
-import { stocks as stocksSchema, alerts } from '../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { stocks as stocksSchema, alerts, klineDaily } from '../db/schema.js';
+import { eq, asc } from 'drizzle-orm';
 import { getTencentStockData } from '../lib/tencent.js';
+import { assessMarketTiming } from '../lib/marketTiming.js';
 
 const app = new Hono();
 
@@ -126,6 +127,27 @@ app.get('/overview', async (c) => {
     });
   } catch (e: any) {
     console.error('Market overview error:', e);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// 大盘择时：基于沪深300四指标共振判定牛/震/熊，映射仓位上限（手册第一步）
+app.get('/timing', async (c) => {
+  try {
+    const db = getDb(c);
+    const indexCode = (c.req.query('code') as string) || 'sh000300';
+    const rows = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, indexCode))
+      .orderBy(asc(klineDaily.date))
+      .limit(300)
+      .all();
+    if (!rows.length) {
+      return c.json({ success: false, error: '指数数据未同步，请先在同步页同步大盘指数' }, 400);
+    }
+    const timing = assessMarketTiming(rows as any[], indexCode);
+    return c.json({ success: true, data: timing });
+  } catch (e: any) {
+    console.error('Market timing error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });

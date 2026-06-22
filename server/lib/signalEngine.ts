@@ -24,6 +24,12 @@ export interface KlineRow {
   ma250?: number | null;
   bias6?: number | null;
   turnoverRate?: number | null;
+  // 风控与资金流扩展字段
+  atr14?: number | null;
+  obv?: number | null;
+  volMa5?: number | null;
+  volRatio?: number | null;
+  pctChg?: number | null;
 }
 
 export interface SignalItem {
