@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { FlaskConical, Play, TrendingUp, Target, Award, RefreshCw, Zap, CheckCircle2, AlertCircle, Clock, Globe2, ShieldCheck, Sparkles, Trophy } from "lucide-react";
+import { FlaskConical, Play, TrendingUp, Target, Award, RefreshCw, Zap, CheckCircle2, AlertCircle, Clock, Globe2, ShieldCheck, Sparkles, Trophy, Activity } from "lucide-react";
 import { cn } from "../lib/utils";
 
 type Status = 'idle' | 'running' | 'completed' | 'error';
@@ -68,6 +68,24 @@ interface StrategyCred {
   blendedCredibility: number | null;
 }
 
+// 推荐引擎历史回放结果
+interface EngineBacktestResult {
+  totalTrades: number;
+  winRate: number;
+  avgReturn: number;
+  totalReturn: number;
+  sharpe: number;
+  maxDrawdown: number;
+  avgHoldDays: number;
+  byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>;
+  byRegime: Record<string, { trades: number; winRate: number; avgReturn: number }>;
+  byMonth: { month: string; trades: number; avgReturn: number }[];
+  range: { start: string; end: string };
+  durationMs: number;
+  strategies: string[];
+  credibility: any[];
+}
+
 const STRATEGY_LABEL: Record<string, string> = {
   three_cycle: '三周期共振',
   macd_cross: 'MACD金叉',
@@ -91,6 +109,11 @@ export default function AutoResearch() {
   const [recommending, setRecommending] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [recTab, setRecTab] = useState<'active' | 'resolved'>('active');
+
+  // 推荐引擎历史回放
+  const [backtesting, setBacktesting] = useState(false);
+  const [backtestResult, setBacktestResult] = useState<EngineBacktestResult | null>(null);
+  const [backtestParams, setBacktestParams] = useState({ days: 120, maxHoldDays: 30, minBuyCount: 1 });
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -189,6 +212,31 @@ export default function AutoResearch() {
       await fetch('/api/research/resolve', { method: 'POST' });
       fetchRecs(); fetchPerf(); fetchCred();
     } finally { setResolving(false); }
+  };
+
+  // 推荐引擎历史回放：验证全局策略组合的历史实战盈利能力
+  const runEngineBacktest = async () => {
+    setBacktesting(true);
+    setBacktestResult(null);
+    try {
+      const res = await fetch('/api/research/backtest-engine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(backtestParams),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setBacktestResult(json.data);
+        // 回放会反哺策略可信度，刷新展示
+        fetchCred();
+      } else {
+        alert(json.error || '回放失败');
+      }
+    } catch (e: any) {
+      alert('网络错误: ' + e.message);
+    } finally {
+      setBacktesting(false);
+    }
   };
 
   // 一键日常闭环：聚合全局策略 → 生成今日推荐 → 结算历史 → 刷新可信度
@@ -389,6 +437,176 @@ export default function AutoResearch() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* 推荐引擎历史回放 —— 验证全局策略组合的历史实战盈利能力 */}
+      <div className="bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-purple-400" />
+            <h2 className="text-lg font-semibold text-white">推荐引擎历史回放</h2>
+            <span className="text-xs text-muted">— 用历史数据验证全局策略组合的实战盈利能力</span>
+          </div>
+          {backtestResult && (
+            <span className="text-xs text-muted">
+              回放区间 {backtestResult.range.start} ~ {backtestResult.range.end} · 耗时 {(backtestResult.durationMs / 1000).toFixed(1)}s
+            </span>
+          )}
+        </div>
+
+        {/* 参数配置 */}
+        <div className="grid grid-cols-4 gap-3 mb-4">
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-muted">回放天数</label>
+            <input
+              type="number"
+              min="30"
+              max="500"
+              value={backtestParams.days}
+              onChange={e => setBacktestParams({ ...backtestParams, days: Number(e.target.value) })}
+              className="bg-canvas-dark border border-hairline-dark rounded px-3 py-1.5 text-[13px] text-white focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-muted">最大持仓天数</label>
+            <input
+              type="number"
+              min="5"
+              max="90"
+              value={backtestParams.maxHoldDays}
+              onChange={e => setBacktestParams({ ...backtestParams, maxHoldDays: Number(e.target.value) })}
+              className="bg-canvas-dark border border-hairline-dark rounded px-3 py-1.5 text-[13px] text-white focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-muted">最低看多策略数</label>
+            <input
+              type="number"
+              min="1"
+              max="4"
+              value={backtestParams.minBuyCount}
+              onChange={e => setBacktestParams({ ...backtestParams, minBuyCount: Number(e.target.value) })}
+              className="bg-canvas-dark border border-hairline-dark rounded px-3 py-1.5 text-[13px] text-white focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div className="flex items-end">
+            <button
+              onClick={runEngineBacktest}
+              disabled={backtesting}
+              className="w-full flex items-center justify-center gap-2 bg-purple-600 text-white py-1.5 rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors disabled:opacity-50"
+            >
+              {backtesting ? (
+                <><div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> 回放中...</>
+              ) : (
+                <><Play className="w-3.5 h-3.5" /> 运行历史回放</>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* 回放结果 */}
+        {backtestResult && (
+          <div className="space-y-4">
+            {/* 整体统计 */}
+            <div className="grid grid-cols-6 gap-3">
+              <MetricCard label="总交易数" value={backtestResult.totalTrades} />
+              <MetricCard label="胜率" value={`${(backtestResult.winRate * 100).toFixed(1)}%`} color={backtestResult.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'} />
+              <MetricCard label="平均收益" value={`${(backtestResult.avgReturn * 100).toFixed(2)}%`} color={backtestResult.avgReturn > 0 ? 'text-green-400' : 'text-red-400'} />
+              <MetricCard label="组合总收益" value={`${(backtestResult.totalReturn * 100).toFixed(1)}%`} color={backtestResult.totalReturn > 0 ? 'text-green-400' : 'text-red-400'} />
+              <MetricCard label="夏普比率" value={backtestResult.sharpe.toFixed(2)} color={backtestResult.sharpe >= 1 ? 'text-green-400' : 'text-yellow-400'} />
+              <MetricCard label="最大回撤" value={`${(backtestResult.maxDrawdown * 100).toFixed(1)}%`} color="text-red-400" />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {/* 按策略归因 */}
+              <div className="bg-canvas-dark rounded-lg p-4">
+                <h3 className="text-sm font-medium text-white mb-3">策略归因</h3>
+                <table className="w-full text-[12px]">
+                  <thead>
+                    <tr className="text-muted border-b border-hairline-dark">
+                      <th className="py-1.5 text-left">策略</th>
+                      <th className="py-1.5 text-right">交易数</th>
+                      <th className="py-1.5 text-right">胜率</th>
+                      <th className="py-1.5 text-right">平均收益</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(backtestResult.byStrategy).map(([name, s]) => {
+                      const stat = s as { trades: number; winRate: number; avgReturn: number };
+                      return (
+                        <tr key={name} className="border-b border-hairline-dark/50">
+                          <td className="py-1.5 text-white">{STRATEGY_LABEL[name] || name}</td>
+                          <td className="py-1.5 text-right text-muted">{stat.trades}</td>
+                          <td className={`py-1.5 text-right ${stat.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(stat.winRate * 100).toFixed(1)}%
+                          </td>
+                          <td className={`py-1.5 text-right ${stat.avgReturn > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(stat.avgReturn * 100).toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* 按大盘环境 */}
+              <div className="bg-canvas-dark rounded-lg p-4">
+                <h3 className="text-sm font-medium text-white mb-3">大盘环境表现</h3>
+                <table className="w-full text-[12px]">
+                  <thead>
+                    <tr className="text-muted border-b border-hairline-dark">
+                      <th className="py-1.5 text-left">环境</th>
+                      <th className="py-1.5 text-right">交易数</th>
+                      <th className="py-1.5 text-right">胜率</th>
+                      <th className="py-1.5 text-right">平均收益</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(backtestResult.byRegime).map(([regime, r]) => {
+                      const stat = r as { trades: number; winRate: number; avgReturn: number };
+                      return (
+                        <tr key={regime} className="border-b border-hairline-dark/50">
+                          <td className="py-1.5 text-white">
+                            {regime === 'bull' ? '牛市' : regime === 'bear' ? '熊市' : '震荡'}
+                          </td>
+                          <td className="py-1.5 text-right text-muted">{stat.trades}</td>
+                          <td className={`py-1.5 text-right ${stat.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(stat.winRate * 100).toFixed(1)}%
+                          </td>
+                          <td className={`py-1.5 text-right ${stat.avgReturn > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(stat.avgReturn * 100).toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* 月度收益 */}
+            <div className="bg-canvas-dark rounded-lg p-4">
+              <h3 className="text-sm font-medium text-white mb-3">月度收益分布</h3>
+              <div className="flex gap-1 items-end h-32">
+                {backtestResult.byMonth.map((m) => {
+                  const ret = m.avgReturn * 100;
+                  const height = Math.min(Math.abs(ret) * 200, 100);
+                  return (
+                    <div key={m.month} className="flex-1 flex flex-col items-center gap-1">
+                      <span className="text-[9px] text-muted">{ret >= 0 ? '+' : ''}{ret.toFixed(1)}%</span>
+                      <div
+                        className={`w-full rounded-t ${ret >= 0 ? 'bg-green-500' : 'bg-red-500'}`}
+                        style={{ height: `${Math.max(height, 4)}%` }}
+                      />
+                      <span className="text-[9px] text-muted truncate w-full text-center">{m.month.slice(5)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 推荐操作栏 */}

@@ -235,3 +235,56 @@ export async function recomputeStrategyCredibility(db: any) {
 
   return results;
 }
+
+/**
+ * 用历史回放结果反哺策略可信度 —— 最强 learn 信号
+ *
+ * 回放是「推荐引擎级」的数百笔历史实战，远比稀疏的实时推荐归因可信。
+ * 回放揭示的真实胜率/收益直接驱动可信度：实战亏钱的策略（如频繁假信号的
+ * MACD 金叉）credibility 大降，被推荐引擎自动边缘化；实战赚钱的策略加权。
+ */
+export async function applyBacktestCredibility(
+  db: any,
+  byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>
+) {
+  const results: any[] = [];
+  for (const strategy of Object.keys(byStrategy)) {
+    const stat = byStrategy[strategy];
+
+    // 先验：参数回测聚合（来自 strategy_optima）
+    const optimaRows = await db.select().from(strategyOptima)
+      .where(eq(strategyOptima.strategy, strategy)).all() as any[];
+    const prior = computeBacktestPrior(optimaRows.map((r: any) => ({
+      paramsJson: r.paramsJson, testReturn: r.testReturn, testSharpe: r.testSharpe,
+      overfitScore: r.overfitScore, tradeCount: r.tradeCount,
+      maxDrawdown: r.maxDrawdown, compositeScore: r.compositeScore,
+    })));
+
+    // 后验：历史回放（数百笔实战，w 接近 1，主导 blended）
+    const realSampleCount = stat.trades;
+    const realWinRate = stat.winRate;
+    const realAvgReturn = stat.avgReturn;
+    const winFactor = realWinRate;
+    const retFactor = Math.max(0, Math.min(1, (realAvgReturn + 0.1) / 0.3));
+    const postScore = realSampleCount > 0 ? winFactor * retFactor : null;
+    const w = realSampleCount / (realSampleCount + PRIOR_STRENGTH);
+    const blended = postScore !== null ? prior.score * (1 - w) + postScore * w : prior.score;
+
+    const row = {
+      strategy,
+      realSampleCount, realWinRate, realAvgReturn,
+      backtestStockCount: prior.stockCount,
+      backtestAvgScore: prior.score, backtestAvgReturn: prior.avgReturn, backtestAvgSharpe: prior.avgSharpe,
+      blendedCredibility: Math.round(blended * 1000) / 1000,
+      updatedAt: new Date(),
+    };
+    await db.insert(strategyCredibility).values(row)
+      .onConflictDoUpdate({ target: strategyCredibility.strategy, set: row }).run();
+
+    results.push({
+      strategy, realSampleCount, realWinRate, realAvgReturn,
+      priorScore: prior.score, blendedCredibility: row.blendedCredibility,
+    });
+  }
+  return results;
+}

@@ -23,7 +23,8 @@ import {
 import type { StrategyType, BacktestParams } from '../lib/backtestEngine.js';
 import { generateRecommendation } from '../lib/recommender.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
-import { resolveRecommendations, getPerformanceStats, recomputeStrategyCredibility } from '../lib/performanceTracker.js';
+import { resolveRecommendations, getPerformanceStats, recomputeStrategyCredibility, applyBacktestCredibility } from '../lib/performanceTracker.js';
+import { backtestRecommendationEngine } from '../lib/recommendationBacktest.js';
 
 const app = new Hono();
 
@@ -519,6 +520,46 @@ app.get('/performance', async (c) => {
     const stats = await getPerformanceStats(db);
     return c.json({ success: true, data: stats });
   } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── POST /backtest-engine: 推荐引擎历史回放（验证实战盈利能力）──
+// 用历史区间每个交易日的数据 + 全局验证策略跑选股，再用后续真实K线结算，
+// 证明「调出的最稳定策略」组合起来在历史上是否真的赚钱
+app.post('/backtest-engine', async (c) => {
+  try {
+    const { days = 120, maxHoldDays = 30, minBuyCount = 1 } = (await c.req.json().catch(() => ({}))) as any;
+    const db = getDb(c);
+
+    const benchmark = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, 'sh000300'))
+      .orderBy(asc(klineDaily.date)).all() as any[];
+    if (benchmark.length < 120) {
+      return c.json({ success: false, error: '基准数据不足 120 天，无法回放' });
+    }
+    const allKlines = await db.select().from(klineDaily).orderBy(asc(klineDaily.date)).all() as any[];
+    const klineMap = new Map<string, any[]>();
+    for (const row of allKlines) {
+      if (!klineMap.has(row.marketCode)) klineMap.set(row.marketCode, []);
+      klineMap.get(row.marketCode)!.push(row);
+    }
+
+    // 经回测验证的全局策略（稳定率≥0.3 才参与）
+    const globalRows = await db.select().from(globalStrategyOptima).all() as any[];
+    const strategies = globalRows
+      .filter((g: any) => (g.stabilityScore ?? 0) >= 0.3)
+      .map((g: any) => ({ strategy: g.strategy as StrategyType, params: JSON.parse(g.paramsJson) as BacktestParams }));
+    if (strategies.length === 0) {
+      return c.json({ success: false, error: '请先运行策略优化提炼全局策略' });
+    }
+
+    const result = backtestRecommendationEngine(klineMap, benchmark, strategies, { days, maxHoldDays, minBuyCount });
+    // 回放结果反哺策略可信度 —— 用数百笔历史实战淘汰亏钱策略（最强 learn）
+    const credibility = await applyBacktestCredibility(db, result.byStrategy);
+    return c.json({ success: true, data: { ...result, strategies: strategies.map(s => s.strategy), credibility } });
+  } catch (e: any) {
+    console.error('Backtest engine error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
