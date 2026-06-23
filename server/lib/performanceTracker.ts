@@ -3,8 +3,13 @@
 // 职责：扫描所有 active 的买入推荐，用最新 K 线判定是否触及止盈/止损/过期，
 // 结算实际收益并回写 returnPct/holdDays/status，形成策略优化的反馈数据。
 
-import { eq, and, lte, sql } from 'drizzle-orm';
-import { klineDaily, recommendations } from '../db/schema.js';
+import { eq, and, sql } from 'drizzle-orm';
+import { klineDaily, recommendations, strategyOptima, strategyCredibility } from '../db/schema.js';
+import { computeBacktestPrior } from './autoResearch.js';
+
+// 贝叶斯先验强度：需积累 N 个真实样本，后验权重才升至 0.5
+// 样本越多越信真实表现；样本不足时退化为回测先验
+const PRIOR_STRENGTH = 20;
 
 const DEFAULT_MAX_HOLD = 30; // 默认最大持仓天数
 
@@ -134,4 +139,99 @@ export async function getPerformanceStats(db: any) {
     .all();
 
   return { overview: stats, byStrategy };
+}
+
+/**
+ * 重算策略可信度 —— AutoResearch 闭环的「learn」环节
+ *
+ * 1. 读所有已结算推荐，把真实收益归因到 strategyDetail 中记录的投票策略
+ * 2. 聚合每个策略的真实胜率/收益（后验）
+ * 3. 读 strategy_optima 算回测先验
+ * 4. 贝叶斯收缩融合：blended = prior·(1-w) + posterior·w，w = N/(N+PRIOR_STRENGTH)
+ *
+ * 结果写入 strategy_credibility，供 recommender 加权 & 下一轮优化参考
+ */
+export async function recomputeStrategyCredibility(db: any) {
+  // ── 1. 归因：把每条已结算推荐的真实收益，分配给参与投票的策略 ──
+  const resolved = await db.select().from(recommendations)
+    .where(sql`return_pct is not null`).all() as any[];
+
+  const stat = new Map<string, { wins: number; total: number; sumReturn: number }>();
+  for (const rec of resolved) {
+    let strategies: string[] = [];
+    try {
+      if (rec.strategyDetail) {
+        const d = JSON.parse(rec.strategyDetail);
+        strategies = Array.isArray(d.buyVotes) ? d.buyVotes : [];
+      }
+    } catch { /* 损坏的 JSON 跳过 */ }
+    if (strategies.length === 0) continue;
+    for (const s of strategies) {
+      if (!stat.has(s)) stat.set(s, { wins: 0, total: 0, sumReturn: 0 });
+      const st = stat.get(s)!;
+      st.total++;
+      st.sumReturn += rec.returnPct ?? 0;
+      if ((rec.returnPct ?? 0) > 0) st.wins++;
+    }
+  }
+
+  // ── 2. 对每个策略融合先验(回测)与后验(真实) ──
+  const KNOWN_STRATEGIES = ['three_cycle', 'macd_cross', 'rsi_reversal', 'ma520'];
+  const allStrategies = new Set<string>([...stat.keys(), ...KNOWN_STRATEGIES]);
+  const results: any[] = [];
+
+  for (const strategy of allStrategies) {
+    // 先验：回测聚合
+    const optimaRows = await db.select().from(strategyOptima)
+      .where(eq(strategyOptima.strategy, strategy)).all() as any[];
+    const prior = computeBacktestPrior(optimaRows.map((r: any) => ({
+      paramsJson: r.paramsJson, testReturn: r.testReturn, testSharpe: r.testSharpe,
+      overfitScore: r.overfitScore, tradeCount: r.tradeCount,
+      maxDrawdown: r.maxDrawdown, compositeScore: r.compositeScore,
+    })));
+
+    // 后验：真实推荐归因
+    const s = stat.get(strategy);
+    const realSampleCount = s?.total ?? 0;
+    const realWinRate = s && s.total > 0 ? s.wins / s.total : null;
+    const realAvgReturn = s && s.total > 0 ? s.sumReturn / s.total : null;
+
+    // 后验得分 = 真实胜率 × 真实收益因子
+    const winFactor = realWinRate ?? 0;
+    const retFactor = realAvgReturn !== null
+      ? Math.max(0, Math.min(1, (realAvgReturn + 0.1) / 0.3)) : 0;
+    const postScore = realSampleCount > 0 ? winFactor * retFactor : null;
+
+    // 贝叶斯收缩：样本越多后验权重越大
+    const w = realSampleCount / (realSampleCount + PRIOR_STRENGTH);
+    const blended = postScore !== null
+      ? prior.score * (1 - w) + postScore * w
+      : prior.score;
+
+    const row = {
+      strategy,
+      realSampleCount,
+      realWinRate,
+      realAvgReturn,
+      backtestStockCount: prior.stockCount,
+      backtestAvgScore: prior.score,
+      backtestAvgReturn: prior.avgReturn,
+      backtestAvgSharpe: prior.avgSharpe,
+      blendedCredibility: Math.round(blended * 1000) / 1000,
+      updatedAt: new Date(),
+    };
+
+    await db.insert(strategyCredibility).values(row)
+      .onConflictDoUpdate({ target: strategyCredibility.strategy, set: row }).run();
+
+    results.push({
+      strategy,
+      realSampleCount, realWinRate, realAvgReturn,
+      priorScore: prior.score,
+      blendedCredibility: row.blendedCredibility,
+      backtestStockCount: prior.stockCount,
+    });
+  }
+
+  return results;
 }

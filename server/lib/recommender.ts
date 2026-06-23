@@ -38,11 +38,13 @@ export interface StockRecommendation {
  * @param rows 最新日K数据（升序，至少 72 行）
  * @param optima 该股票各策略的最优参数，key=strategy
  * @param marketRegime 当前大盘环境
+ * @param credibility 各策略的融合可信度（回测先验+真实后验），用于投票加权；缺失则按 1 中性处理
  */
 export function generateRecommendation(
   rows: KlineRow[],
   optima: { strategy: StrategyType; params: BacktestParams; compositeScore: number }[],
   marketRegime: 'bull' | 'range' | 'bear',
+  credibility?: Partial<Record<StrategyType, number>>,
 ): StockRecommendation {
   const code = (rows[0] as any)?.marketCode ?? '';
   const last = rows[rows.length - 1];
@@ -55,8 +57,10 @@ export function generateRecommendation(
   for (const opt of optima) {
     const params = { ...opt.params, marketRegime };
     const signal = generateSignal(opt.strategy, params, rows, i);
-    const weightedScore = signal === 'buy' ? opt.compositeScore : signal === 'sell' ? -opt.compositeScore : 0;
-    votes.push({ strategy: opt.strategy, signal, score: opt.compositeScore });
+    // 可信度加权：真实表现差的策略即使发信号，对共识置信度的贡献也被压低
+    const cred = credibility?.[opt.strategy] ?? 1;
+    const effScore = opt.compositeScore * cred;
+    votes.push({ strategy: opt.strategy, signal, score: effScore });
     if (signal === 'buy') buyCount++;
     if (signal === 'sell') sellCount++;
   }

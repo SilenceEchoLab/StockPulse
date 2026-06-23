@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { createServer as createViteServer } from 'vite';
-import app, { initSettings, pollAlerts } from './index.js';
+import app, { initSettings, pollAlerts, runResearchCycle } from './index.js';
 
 const port = Number(process.env.PORT) || 3000;
 
@@ -35,6 +35,16 @@ async function startServer() {
   const alertTimer = setInterval(() => {
     pollAlerts().catch((e) => console.error('Alert polling error:', e));
   }, 60_000);
+
+  // 可选：研究闭环自转（RESEARCH_AUTO=1 开启，启动跑一次 + 每6小时一次）
+  // 日常聚合全局策略、生成推荐、结算历史、刷新可信度；重优化仍由前端手动触发
+  if (process.env.RESEARCH_AUTO === '1') {
+    console.log('[AutoResearch] 自转已开启 (RESEARCH_AUTO=1)，每6小时执行一次日常闭环');
+    runResearchCycle().catch((e) => console.error('Research cycle error:', e));
+    setInterval(() => {
+      runResearchCycle().catch((e) => console.error('Research cycle error:', e));
+    }, 6 * 60 * 60 * 1000);
+  }
 
   server.listen(port, () => {
     console.log(`StockPulse dev server running at http://localhost:${port}`);

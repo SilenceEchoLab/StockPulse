@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { FlaskConical, Play, TrendingUp, Target, Award, RefreshCw, Zap, CheckCircle2, AlertCircle, Clock } from "lucide-react";
+import { FlaskConical, Play, TrendingUp, Target, Award, RefreshCw, Zap, CheckCircle2, AlertCircle, Clock, Globe2, ShieldCheck, Sparkles, Trophy } from "lucide-react";
 import { cn } from "../lib/utils";
 
 type Status = 'idle' | 'running' | 'completed' | 'error';
@@ -45,11 +45,49 @@ interface PerfStats {
   byStrategy: { strategy: string; total: number; winRate: number; avgReturn: number }[];
 }
 
+// 全局稳健策略 —— 跨股票中位数聚合提炼的「最稳定策略」
+interface GlobalOptima {
+  strategy: string;
+  params: Record<string, number>;
+  avgTestReturn: number | null;
+  avgTestSharpe: number | null;
+  avgMaxDrawdown: number | null;
+  stabilityScore: number | null;  // 稳定率 = 稳健子集 / 参与股票
+  coverageStocks: number;
+  sampleStocks: number;
+  aggregatedAt: string;
+}
+
+// 策略可信度 —— 先验(回测)+后验(真实推荐)贝叶斯融合
+interface StrategyCred {
+  strategy: string;
+  realSampleCount: number;
+  realWinRate: number | null;
+  realAvgReturn: number | null;
+  backtestAvgScore: number | null;
+  blendedCredibility: number | null;
+}
+
+const STRATEGY_LABEL: Record<string, string> = {
+  three_cycle: '三周期共振',
+  macd_cross: 'MACD金叉',
+  rsi_reversal: 'RSI反转',
+  ma520: 'MA520战法',
+};
+const PARAM_LABEL: Record<string, string> = {
+  stopLoss: '止损', takeProfit: '止盈', trailingStop: '移动止盈',
+  maxHoldDays: '最大持仓(天)', scoreThreshold: '共振阈值',
+  rsiBuy: 'RSI买入', rsiSell: 'RSI卖出',
+};
+
 export default function AutoResearch() {
   const [optimizing, setOptimizing] = useState(false);
   const [status, setStatus] = useState<ResearchStatus | null>(null);
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [perf, setPerf] = useState<PerfStats | null>(null);
+  const [globalOptima, setGlobalOptima] = useState<GlobalOptima[]>([]);
+  const [cred, setCred] = useState<StrategyCred[]>([]);
+  const [cycling, setCycling] = useState(false);
   const [recommending, setRecommending] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [recTab, setRecTab] = useState<'active' | 'resolved'>('active');
@@ -81,18 +119,42 @@ export default function AutoResearch() {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchGlobal = useCallback(async () => {
+    try {
+      const res = await fetch('/api/research/global-optima');
+      const json = await res.json();
+      if (json.success) setGlobalOptima(json.data || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchCred = useCallback(async () => {
+    try {
+      const res = await fetch('/api/research/credibility');
+      const json = await res.json();
+      if (json.success) setCred(json.data || []);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     fetchRecs();
     fetchPerf();
+    fetchGlobal();
+    fetchCred();
   }, []);
 
-  // 轮询优化进度
+  // 轮询优化进度；优化完成时刷新全局策略与可信度（learn 产出）
   useEffect(() => {
     if (!optimizing) return;
-    const timer = setInterval(() => { fetchStatus(); }, 2000);
+    const timer = setInterval(() => {
+      fetchStatus();
+      if (status?.status === 'completed') {
+        fetchGlobal();
+        fetchCred();
+      }
+    }, 2000);
     return () => clearInterval(timer);
-  }, [optimizing, fetchStatus]);
+  }, [optimizing, fetchStatus, status?.status, fetchGlobal, fetchCred]);
 
   const startOptimize = async () => {
     setOptimizing(true);
@@ -125,8 +187,22 @@ export default function AutoResearch() {
     setResolving(true);
     try {
       await fetch('/api/research/resolve', { method: 'POST' });
-      fetchRecs(); fetchPerf();
+      fetchRecs(); fetchPerf(); fetchCred();
     } finally { setResolving(false); }
+  };
+
+  // 一键日常闭环：聚合全局策略 → 生成今日推荐 → 结算历史 → 刷新可信度
+  const runAutoCycle = async () => {
+    setCycling(true);
+    try {
+      const res = await fetch('/api/research/auto-cycle', { method: 'POST' });
+      const json = await res.json();
+      if (json.success) {
+        fetchGlobal(); fetchCred(); fetchRecs(); fetchPerf();
+      } else {
+        alert(json.error || '闭环执行失败');
+      }
+    } finally { setCycling(false); }
   };
 
   const o = perf?.overview;
@@ -145,10 +221,11 @@ export default function AutoResearch() {
         <div className="flex items-center justify-between gap-2 text-sm">
           {[
             { icon: Zap, label: '参数搜索', desc: '网格采样', color: 'text-yellow-400' },
-            { icon: Target, label: 'Walk-Forward', desc: 'Train 60% / Test 40%', color: 'text-blue-400' },
-            { icon: Award, label: '防过拟合', desc: '调和均值评分', color: 'text-purple-400' },
-            { icon: TrendingUp, label: '多策略共识', desc: '每日推荐', color: 'text-green-400' },
-            { icon: RefreshCw, label: '绩效反馈', desc: '结算收益', color: 'text-orange-400' },
+            { icon: Target, label: 'Walk-Forward', desc: 'Train/Test 验证', color: 'text-blue-400' },
+            { icon: Award, label: '防过拟合', desc: '调和均值+交易门槛', color: 'text-purple-400' },
+            { icon: Globe2, label: '全局提炼', desc: '中位数聚合', color: 'text-cyan-400' },
+            { icon: ShieldCheck, label: '可信度学习', desc: '真实绩效反哺', color: 'text-green-400' },
+            { icon: RefreshCw, label: '共识推荐', desc: '每日生成+结算', color: 'text-orange-400' },
           ].map((step, i, arr) => (
             <div key={i} className="flex items-center gap-2 flex-1">
               <div className="flex flex-col items-center gap-1 flex-1">
@@ -232,8 +309,98 @@ export default function AutoResearch() {
         </div>
       </div>
 
+      {/* 全局稳健策略 & 可信度 —— 闭环核心成果 */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* 全局稳健策略（最稳定策略）—— 跨股票中位数聚合 */}
+        <div className="lg:col-span-2 bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
+          <div className="flex items-center gap-2 mb-4">
+            <Trophy className="w-5 h-5 text-yellow-400" />
+            <h2 className="text-lg font-semibold text-white">全局稳健策略</h2>
+            <span className="text-xs text-muted">— 跨股票中位数聚合的「最稳定策略」</span>
+          </div>
+          {globalOptima.length === 0 ? (
+            <div className="p-8 text-center text-muted text-sm">
+              <Globe2 className="w-10 h-10 mx-auto mb-2 opacity-30" />
+              尚未提炼全局策略，请先启动优化
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {globalOptima.map((g) => (
+                <div key={g.strategy} className="bg-canvas-dark rounded-lg p-3.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-white font-medium">{STRATEGY_LABEL[g.strategy] || g.strategy}</span>
+                      <span className="text-xs text-muted">{g.coverageStocks}/{g.sampleStocks} 股票稳健</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="text-green-400">收益 {((g.avgTestReturn ?? 0) * 100).toFixed(1)}%</span>
+                      <span className="text-muted">夏普 {(g.avgTestSharpe ?? 0).toFixed(2)}</span>
+                      <span className="text-red-400">回撤 {((g.avgMaxDrawdown ?? 0) * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs text-muted w-12">稳定率</span>
+                    <div className="flex-1 h-1.5 bg-black/30 rounded-full overflow-hidden">
+                      <div
+                        className={cn('h-full rounded-full', (g.stabilityScore ?? 0) >= 0.6 ? 'bg-green-500' : (g.stabilityScore ?? 0) >= 0.3 ? 'bg-yellow-500' : 'bg-red-500')}
+                        style={{ width: `${Math.round((g.stabilityScore ?? 0) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-xs font-bold text-white w-10 text-right">{Math.round((g.stabilityScore ?? 0) * 100)}%</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {Object.entries(g.params).filter(([k]) => PARAM_LABEL[k]).map(([k, v]) => (
+                      <span key={k} className="px-1.5 py-0.5 rounded bg-white/5 text-muted text-[10px]">
+                        {PARAM_LABEL[k]} {['stopLoss', 'takeProfit', 'trailingStop'].includes(k) ? `${(Number(v) * 100).toFixed(0)}%` : v}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 策略可信度 —— 先验(回测)+后验(真实)贝叶斯融合 */}
+        <div className="bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
+          <div className="flex items-center gap-2 mb-4">
+            <ShieldCheck className="w-5 h-5 text-green-400" />
+            <h2 className="text-lg font-semibold text-white">策略可信度</h2>
+          </div>
+          {cred.length === 0 ? (
+            <div className="p-6 text-center text-muted text-sm">尚无可信度数据</div>
+          ) : (
+            <div className="space-y-3">
+              {cred.map((c) => (
+                <div key={c.strategy} className="bg-canvas-dark rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-white text-sm font-medium">{STRATEGY_LABEL[c.strategy] || c.strategy}</span>
+                    <span className="text-lg font-bold text-white">{((c.blendedCredibility ?? 0) * 100).toFixed(0)}</span>
+                  </div>
+                  <div className="h-1.5 bg-black/30 rounded-full overflow-hidden mb-1.5">
+                    <div className="h-full bg-primary rounded-full" style={{ width: `${Math.round((c.blendedCredibility ?? 0) * 100)}%` }} />
+                  </div>
+                  <div className="text-[10px] text-muted">
+                    先验 {(c.backtestAvgScore ?? 0).toFixed(2)} · 真实 {c.realSampleCount} 样本
+                    {c.realSampleCount > 0 && ` · 胜率 ${Math.round((c.realWinRate ?? 0) * 100)}%`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* 推荐操作栏 */}
       <div className="flex items-center gap-3">
+        <button
+          onClick={runAutoCycle}
+          disabled={cycling}
+          className="flex items-center gap-2 bg-primary text-ink px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          <Sparkles className={cn('w-4 h-4', cycling && 'animate-spin')} />
+          {cycling ? '闭环执行中...' : '一键闭环 (聚合→推荐→结算→学习)'}
+        </button>
         <button
           onClick={generateRecs}
           disabled={recommending}

@@ -18,7 +18,7 @@ import notificationsRoutes from './routes/notifications.js';
 import marketRoutes from './routes/market.js';
 import settingsRoutes from './routes/settings.js';
 import backtestRoutes from './routes/backtest.js';
-import researchRoutes from './routes/research.js';
+import researchRoutes, { runAutoCycle } from './routes/research.js';
 
 const app = new Hono();
 
@@ -128,5 +128,17 @@ async function pollAlerts(env?: any) {
   }
 }
 
+// AutoResearch 闭环自转：聚合全局策略 → 生成今日推荐 → 结算历史 → 刷新可信度
+// 供 worker.ts 生产 cron 与 dev.ts 本地调度复用；失败不抛出，避免拖垮告警轮询
+async function runResearchCycle(env?: any) {
+  try {
+    const db = getDb(env ? { env } : undefined);
+    return await runAutoCycle(db);
+  } catch (e) {
+    console.error('Research cycle error:', e);
+    return null;
+  }
+}
+
 export default app;
-export { initSettings, initStockPool, pollAlerts };
+export { initSettings, initStockPool, pollAlerts, runResearchCycle };

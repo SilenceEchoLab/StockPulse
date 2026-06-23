@@ -182,6 +182,8 @@ export const recommendations = sqliteTable('recommendations', {
   entryPrice: real('entry_price'),
   stopLoss: real('stop_loss'),
   takeProfit: real('take_profit'),
+  // 参与投票的策略及各自置信度（JSON），用于把真实收益归因到具体策略 —— Karpathy learn 环节
+  strategyDetail: text('strategy_detail'),
   reason: text('reason'),
   status: text('status').default('active'), // active | hit_tp | hit_sl | expired | closed
   resolvedAt: integer('resolved_at', { mode: 'timestamp' }),
@@ -194,4 +196,44 @@ export const recommendations = sqliteTable('recommendations', {
   codeIdx: index('recommendations_code_idx').on(table.marketCode),
   statusIdx: index('recommendations_status_idx').on(table.status),
 }));
+
+// ═══ AutoResearch: 全局稳健策略 & 反馈闭环 ═══
+
+// 全局稳健策略 —— 从所有 per-stock optima 中聚合提炼的"平台默认策略"
+// 一组跨股票、跨时期都稳定的参数，对应"最稳定最具盈利能力的交易策略"
+export const globalStrategyOptima = sqliteTable('global_strategy_optima', {
+  strategy: text('strategy').notNull(),
+  // 大盘环境维度：同一策略在不同 regime 下可能有不同最优参数
+  regime: text('regime').notNull().default('all'), // all | bull | range | bear
+  paramsJson: text('params_json').notNull(),        // 聚合后的全局参数（中位数）
+  avgTestReturn: real('avg_test_return'),           // 稳健子集平均测试收益
+  avgTestSharpe: real('avg_test_sharpe'),           // 稳健子集平均测试夏普
+  avgMaxDrawdown: real('avg_max_drawdown'),         // 平均最大回撤
+  stabilityScore: real('stability_score'),          // 稳定率 = 稳健子集股票数 / 参与股票数
+  coverageStocks: integer('coverage_stocks').notNull().default(0), // 稳健子集股票数
+  sampleStocks: integer('sample_stocks').notNull().default(0),     // 参与聚合的总股票数
+  aggregatedAt: integer('aggregated_at', { mode: 'timestamp' }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.strategy, table.regime] }),
+}));
+
+// 策略可信度 —— Karpathy 闭环的核心反馈层
+// 先验：回测表现（来自 strategy_optima 聚合）
+// 后验：真实推荐表现（来自 recommendations 结算，归因到策略）
+// 融合可信度 = 先验×(1-w) + 后验×w，w 随真实样本量增长（证据越多越信真实表现）
+export const strategyCredibility = sqliteTable('strategy_credibility', {
+  strategy: text('strategy').primaryKey(),
+  // ── 后验：真实推荐表现 ──
+  realSampleCount: integer('real_sample_count').notNull().default(0),
+  realWinRate: real('real_win_rate'),
+  realAvgReturn: real('real_avg_return'),
+  // ── 先验：回测表现 ──
+  backtestStockCount: integer('backtest_stock_count').notNull().default(0),
+  backtestAvgScore: real('backtest_avg_score'),
+  backtestAvgReturn: real('backtest_avg_return'),
+  backtestAvgSharpe: real('backtest_avg_sharpe'),
+  // ── 融合可信度 0-1（推荐排序 & 下一轮优化先验使用）──
+  blendedCredibility: real('blended_credibility'),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }),
+});
 
