@@ -88,9 +88,14 @@ export function generateRecommendation(
     const avgScore = votes.filter(v => v.signal === 'sell').reduce((s, v) => s + v.score, 0) / sellCount;
     const sellBoost = signalReport.sellSignals.filter(s => s.urgency === 'high').length * 0.1;
     confidence = Math.min(0.95, consensusStrength * avgScore + sellBoost);
-  } else if (buyCount === 1 && sellCount === 0) {
-    action = 'hold'; // 单策略信号不够强，仅观望
-    confidence = consensusStrength * 0.3;
+  } else if (buyCount >= 1 && sellCount === 0) {
+    // 单策略买入信号：经验证策略看多即纳入推荐（降级产出，保证每日有候选进入闭环）
+    // 置信度上限 0.6 以区分强共识；取看多策略的最高加权评分
+    action = 'buy';
+    const buyVotesArr = votes.filter(v => v.signal === 'buy');
+    const topScore = Math.max(...buyVotesArr.map(v => v.score));
+    const cycleBoost = cycleResult.score > 60 ? 0.08 : 0;
+    confidence = Math.max(0.3, Math.min(0.6, topScore * 0.6 + cycleBoost));
   }
 
   // 止损/止盈计算（取所有 BUY 策略的参数均值，或用默认值）
