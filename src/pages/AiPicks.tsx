@@ -3,6 +3,10 @@ import { Cpu, TrendingUp, AlertTriangle, ChevronRight, Activity, ArrowRight, Shi
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 
+const STRATEGY_LABEL: Record<string, string> = {
+  three_cycle: '三周期', macd_cross: 'MACD', rsi_reversal: 'RSI', ma520: 'MA520',
+};
+
 interface AIPick {
   marketCode: string;
   name: string;
@@ -11,6 +15,8 @@ interface AIPick {
   signals: { type: string; name: string; confidence: number }[];
   trendScore?: number | null;
   scoreBreakdown?: { trend: number; structure: number; volumePrice: number; timing: number } | null;
+  // AutoResearch 反哺：经回测验证的策略多策略共识
+  researchConsensus?: { buyCount: number; totalStrategies: number; consensusScore: number; buyVotes: string[] } | null;
 }
 
 // 策略缓存 + 模块级请求序列号，用于丢弃过期响应，消除竞态
@@ -208,6 +214,11 @@ export default function AiPicks() {
                                  {sig.type === 'bullish' ? '▲' : '▼'} {sig.name} ({(sig.confidence * 100).toFixed(0)}%)
                                </span>
                              ))}
+                             {pick.researchConsensus && pick.researchConsensus.buyCount > 0 && (
+                               <span className="text-[11px] px-2 py-1 rounded bg-primary/10 border border-primary/30 text-primary flex items-center gap-1" title={`经回测验证的策略：${pick.researchConsensus.buyVotes.map(v => STRATEGY_LABEL[v] || v).join('、')}`}>
+                                 <ShieldCheck className="w-3 h-3" /> {pick.researchConsensus.buyCount}/{pick.researchConsensus.totalStrategies} 策略验证
+                               </span>
+                             )}
                            </div>
                         </div>
 

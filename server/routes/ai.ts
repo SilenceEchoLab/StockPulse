@@ -1,12 +1,14 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
-import { aiSentiment, klineDaily, dailySnapshot, stocks as stocksSchema, strategyOptima, recommendations } from '../db/schema.js';
+import { aiSentiment, klineDaily, dailySnapshot, stocks as stocksSchema, strategyOptima, recommendations, globalStrategyOptima, strategyCredibility } from '../db/schema.js';
 import { eq, desc, isNotNull, gte, asc, and, sql } from 'drizzle-orm';
 import { getAiClient, getAiModel, getAiPrompt } from '../ai/index.js';
 import { aiPicksCache } from '../lib/state.js';
 import { scoreStock, scoreContrarian, detectSignals } from '../lib/signalEngine.js';
 import { scoreMultiCycle } from '../lib/cycles.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
+import { generateSignal } from '../lib/backtestEngine.js';
+import type { BacktestParams, StrategyType } from '../lib/backtestEngine.js';
 
 const app = new Hono();
 
@@ -101,7 +103,14 @@ const DEFAULT_PICKS_PROMPT = `你是"量化选股官"，一位严格遵循趋势
 - 偏好：多头排列 + 放量上涨 + 缩量回调 + MACD零轴上方
 - 盈亏比要求：下行风险 vs 上行空间 >= 1:2 才纳入推荐
 
-### 第五步：配置输出
+### 第五步：AutoResearch 策略验证（历史回测反哺）
+每只候选股附带 researchConsensus —— 经过 3.3 年 walk-forward 回测验证的全局稳健策略（稳定率≥30%）的实时多策略共识：
+- buyCount/totalStrategies：当前有多少个已验证策略看多
+- consensusScore：加权共识分（稳定率×可信度），越高越可靠
+- buyVotes：看多的具体策略（如 ma520 / macd_cross / three_cycle）
+优先选择 buyCount≥2 或 consensusScore 高的标的 —— 这些是经历史检验的策略共同认可的方向，可信度更高。
+
+### 第六步：配置输出
 严格按 {{count}} 只输出，按综合得分降序。区分核心仓位和卫星仓位。
 策略方向：{{strategy}}
 
@@ -292,6 +301,27 @@ app.post('/picks', async (c) => {
       return acc;
     }, {});
 
+    // ── 大盘择时（提前算，供 research 共识与 prompt 共用）──
+    const indexRows = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, 'sh000300'))
+      .orderBy(asc(klineDaily.date)).limit(300).all() as any[];
+    const timing = indexRows.length >= 60 ? assessMarketTiming(indexRows, 'sh000300') : null;
+    const regime = timing?.regime as 'bull' | 'range' | 'bear' | undefined;
+
+    // ── AutoResearch 反哺：经回测验证的全局稳健策略 + 贝叶斯可信度 ──
+    // 用这些「最稳定策略」的实时多策略共识，作为 AI 选股的历史验证依据
+    const globalRows = await db.select().from(globalStrategyOptima).all() as any[];
+    const credRows = await db.select().from(strategyCredibility).all() as any[];
+    const credibility: Partial<Record<string, number>> = {};
+    for (const cr of credRows) credibility[cr.strategy] = cr.blendedCredibility ?? 1;
+    const validatedStrategies = globalRows
+      .filter((g: any) => (g.stabilityScore ?? 0) >= 0.3)
+      .map((g: any) => ({
+        strategy: g.strategy as StrategyType,
+        params: JSON.parse(g.paramsJson) as BacktestParams,
+        stability: g.stabilityScore ?? 0,
+      }));
+
     const dataByCode = new Map<string, any[]>();
     for (const row of allKlines) {
       if (!dataByCode.has(row.marketCode)) dataByCode.set(row.marketCode, []);
@@ -302,34 +332,48 @@ app.post('/picks', async (c) => {
       });
     }
 
-    // 三周期共振打分引擎对每只股票评分
+    // 打分引擎评分 + AutoResearch 多策略共识（用全局验证参数跑 generateSignal）
     let scored: any[] = [];
     for (const [code, rows] of dataByCode) {
       if (rows.length < 10) continue;
       const snap = snapshotMap[code];
-      let result;
-      if (strategy === 'contrarian') {
-        result = scoreContrarian(rows);
-      } else {
-        result = scoreStock(rows);
+      const result = strategy === 'contrarian' ? scoreContrarian(rows) : scoreStock(rows);
+
+      // AutoResearch 共识：经回测验证的策略当前是否看多（稳定率×可信度加权）
+      const i = rows.length;
+      let researchBuy = 0, researchScore = 0;
+      const researchVotes: string[] = [];
+      for (const vs of validatedStrategies) {
+        const params = { ...vs.params, marketRegime: regime } as BacktestParams;
+        if (generateSignal(vs.strategy, params, rows, i) === 'buy') {
+          researchBuy++;
+          researchScore += vs.stability * (credibility[vs.strategy] ?? 1);
+          researchVotes.push(vs.strategy);
+        }
       }
+
       scored.push({
         marketCode: code,
         close: rows[rows.length - 1].close,
         scoreResult: result,
         pe: snap?.peRatio,
         pb: snap?.pbRatio,
+        researchBuy, researchScore, researchVotes,
       });
     }
 
-    // 策略筛选与排序
+    // 策略筛选与排序（momentum/contrarian 叠加 AutoResearch 共识加分）
     if (strategy === 'value') {
       scored = scored.filter(s => s.pe && s.pe > 0);
       // 价值策略：趋势打分作为安全过滤器，PE 从低到高
       scored.sort((a, b) => (a.pe || 0) - (b.pe || 0));
     } else {
-      // momentum / contrarian：按引擎综合评分降序
-      scored.sort((a, b) => b.scoreResult.score - a.scoreResult.score);
+      // momentum / contrarian：经回测验证的策略看多者优先（反哺驱动推荐），
+      // 同 buyCount 再按「引擎评分 + 共识加权」
+      scored.sort((a, b) => {
+        if (b.researchBuy !== a.researchBuy) return b.researchBuy - a.researchBuy;
+        return (b.scoreResult.score + b.researchScore * 10) - (a.scoreResult.score + a.researchScore * 10);
+      });
     }
     const candidates = scored.slice(0, 30);
 
@@ -349,15 +393,16 @@ app.post('/picks', async (c) => {
       pe: s.pe?.toFixed(2) || 'N/A',
       pb: s.pb?.toFixed(2) || 'N/A',
       industry: metaMap[s.marketCode]?.industry || '',
+      // AutoResearch 反哺：经回测验证的策略共识，供 LLM 选股参考
+      researchConsensus: {
+        buyCount: s.researchBuy,
+        totalStrategies: validatedStrategies.length,
+        consensusScore: Number(s.researchScore.toFixed(2)),
+        buyVotes: s.researchVotes,
+      },
     }));
 
-    // 大盘择时数据注入 prompt
-    const indexRows = await db.select().from(klineDaily)
-      .where(eq(klineDaily.marketCode, 'sh000300'))
-      .orderBy(asc(klineDaily.date)).limit(300).all() as any[];
-    const timing = indexRows.length >= 60 ? assessMarketTiming(indexRows, 'sh000300') : null;
     const regimeLabel = timing ? `${timing.regime}(${timing.regimeLabel})` : 'unknown';
-    const maxPosition = timing ? timing.maxPosition : 0.5;
 
     const rawPrompt = await getAiPrompt('ai_picks_prompt', DEFAULT_PICKS_PROMPT, c);
     const strategyName = strategy === 'momentum' ? '动量突破' : strategy === 'contrarian' ? '逆向反转' : '价值回归';
@@ -392,6 +437,12 @@ app.post('/picks', async (c) => {
         score: item.scoreResult.score,
         reason: item.scoreResult.signals[0]?.name || '多因子共振',
         signals: item.scoreResult.signals,
+        researchConsensus: {
+          buyCount: item.researchBuy,
+          totalStrategies: validatedStrategies.length,
+          consensusScore: Number(item.researchScore.toFixed(2)),
+          buyVotes: item.researchVotes,
+        },
       }));
       return c.json({ success: true, generatedAt: new Date(), picks });
     }
@@ -405,6 +456,12 @@ app.post('/picks', async (c) => {
         ...p,
         trendScore: sc?.scoreResult.score ?? null,
         scoreBreakdown: sc?.scoreResult.breakdown ?? null,
+        researchConsensus: sc ? {
+          buyCount: sc.researchBuy,
+          totalStrategies: validatedStrategies.length,
+          consensusScore: Number(sc.researchScore.toFixed(2)),
+          buyVotes: sc.researchVotes,
+        } : null,
       };
     });
     const resultData = { generatedAt: new Date(), picks, timing: timing ? { regime: timing.regime, regimeLabel: timing.regimeLabel, maxPosition: timing.maxPosition } : null };
