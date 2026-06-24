@@ -16,3 +16,7 @@ data/
 docs/趋势投资.md
 docs/趋势投资.docx
 .claude/
+
+# Agent framework
+.agents/
+skills-lock.json
