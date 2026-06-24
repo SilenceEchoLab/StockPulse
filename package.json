@@ -9,7 +9,8 @@
     "build": "vite build && esbuild server/index.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild server/workers/optimizeWorker.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/optimizeWorker.cjs",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "agent:research": "tsx server/scripts/auto_research_agent.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.5",

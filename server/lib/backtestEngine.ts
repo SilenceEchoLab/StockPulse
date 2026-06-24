@@ -160,48 +160,41 @@ export function generateSignal(
     volCount++;
   }
   const volMa5 = volCount > 0 ? volSum / volCount : prev.volume;
-  // 放量确认：突破时量比前均量至少 1.5 倍以上
-  const isVolumeExpanded = prev.volume >= volMa5 * 1.5;
+  // 放量确认：突破时量比前均量至少 1.2 倍以上（缓解无票可买的问题）
+  const isVolumeExpanded = prev.volume >= volMa5 * 1.2;
+
+  // 极高胜率全局过滤：移除之前过于死板的全盘 MA20 封锁，交由各策略自行判断
+  const ma20Global = safe(prev.ma20);
 
   if (strategy === 'macd_cross') {
     const macd = safe(prev.macd) ?? 0;
     const sig = safe(prev.macdSignal) ?? 0;
     
-    // Lookback window: check if a golden cross happened in the last 3 days
     let recentCross = false;
     for (let k = 1; k <= 3; k++) {
       if (i - k - 1 < 0) break;
-      const rCurr = rows[i - k];
-      const rPrev = rows[i - k - 1];
-      const cMacd = safe(rCurr.macd) ?? 0;
-      const cSig = safe(rCurr.macdSignal) ?? 0;
-      const pMacd = safe(rPrev.macd) ?? 0;
-      const pSig = safe(rPrev.macdSignal) ?? 0;
+      const cMacd = safe(rows[i - k].macd) ?? 0;
+      const cSig = safe(rows[i - k].macdSignal) ?? 0;
+      const pMacd = safe(rows[i - k - 1].macd) ?? 0;
+      const pSig = safe(rows[i - k - 1].macdSignal) ?? 0;
       if (pMacd <= pSig && cMacd > cSig) {
         recentCross = true;
         break;
       }
     }
     
-    // 趋势共振过滤：已在最上方隔离，这里只验证量能和金叉有效性
-    const aboveZero = macd > -0.05;
-    const ma20 = safe(prev.ma20);
-    const ma5 = safe(prev.ma5);
-    const isUptrend = ma20 !== null && prev.close > ma20;
-    // 提高胜率组合：MACD金叉必须伴随 MA5 > MA20
-    const has520Support = ma5 !== null && ma20 !== null && ma5 > ma20;
-    if (recentCross && macd > sig && isVolumeExpanded && aboveZero && isUptrend && has520Support) return 'buy';
+    const aboveZero = macd > -0.05; // 稍微放宽 0 轴要求
+    const bullishDay = prev.close > prev.open; // 阳线确认
+    // 移除 isUptrend (close > ma20)，因为 MACD 金叉通常在价格突破均线前发生！解决时序错配问题。
+    if (recentCross && macd > sig && isVolumeExpanded && aboveZero && bullishDay) return 'buy';
     
-    // Lookback window for death cross
     let recentDeathCross = false;
     for (let k = 1; k <= 3; k++) {
       if (i - k - 1 < 0) break;
-      const rCurr = rows[i - k];
-      const rPrev = rows[i - k - 1];
-      const cMacd = safe(rCurr.macd) ?? 0;
-      const cSig = safe(rCurr.macdSignal) ?? 0;
-      const pMacd = safe(rPrev.macd) ?? 0;
-      const pSig = safe(rPrev.macdSignal) ?? 0;
+      const cMacd = safe(rows[i - k].macd) ?? 0;
+      const cSig = safe(rows[i - k].macdSignal) ?? 0;
+      const pMacd = safe(rows[i - k - 1].macd) ?? 0;
+      const pSig = safe(rows[i - k - 1].macdSignal) ?? 0;
       if (pMacd >= pSig && cMacd < cSig) {
         recentDeathCross = true;
         break;
@@ -216,11 +209,14 @@ export function generateSignal(
     const buyT = params.rsiBuy ?? 30;
     const sellT = params.rsiSell ?? 70;
     const rsi = safe(prev.rsi14) ?? 50;
-    // 左侧策略：不再使用迟钝的 MA250，改用 MA60，要求未处于极端空头排列且站上中期趋势
-    // RSI左侧抄底也需要量缩企稳或底部放量，为了高胜率，加上 RSI超卖且量能配合
-    const longTermUp = ma60 !== null ? prev.close > ma60 : true;
-    const rsiBullish = prev.close > prev.open; // 收阳线企稳
-    if (rsi < buyT && longTermUp && !isBearish && rsiBullish) return 'buy';
+    const prevRsi = safe(rows[i-2]?.rsi14) ?? 50;
+    
+    const rsiTurningUp = rsi > prevRsi; 
+    const volMa5_ = safe(prev.volMa5) ?? prev.volume;
+    const panicStopping = prev.volume < volMa5_ * 2;
+    const rsiBullish = prev.close > prev.open; 
+    
+    if (rsi < buyT && rsiBullish && rsiTurningUp && panicStopping) return 'buy';
     if (rsi > sellT) return 'sell';
     return 'hold';
   }
@@ -228,9 +224,9 @@ export function generateSignal(
   if (strategy === 'ma520') {
     const ma5 = safe(prev.ma5);
     const ma20 = safe(prev.ma20);
+    const prevMa20 = safe(rows[i-2]?.ma20);
     
-    if (ma5 !== null && ma20 !== null) {
-      // 1. Lookback window for crossover
+    if (ma5 !== null && ma20 !== null && prevMa20 !== null) {
       let recentCross = false;
       let recentDeathCross = false;
       for (let k = 1; k <= 3; k++) {
@@ -245,20 +241,20 @@ export function generateSignal(
         }
       }
       
-      // 提高胜率组合：520金叉必须伴随 MACD 强势
       const macd = safe(prev.macd) ?? 0;
       const sig = safe(prev.macdSignal) ?? 0;
       const hasMacdSupport = macd > sig;
-      if (recentCross && ma5 > ma20 && isVolumeExpanded && prev.close > ma20 && hasMacdSupport) return 'buy';
+      
+      const ma20Rising = ma20 >= prevMa20 * 0.998; 
+      
+      // 移除 isVolumeExpanded 限制，因为均线金叉是滞后指标，突破日大概率不在金叉这3天内，强制放量会导致错过大量真实金叉！
+      if (recentCross && ma5 > ma20 && prev.close > ma20 && hasMacdSupport && ma20Rising) return 'buy';
       if (recentDeathCross && ma5 < ma20) return 'sell';
       
-      // 2. Trend Confirmation & Pullback to Support
-      // If long term trend is up (MA5 > MA20 * 1.01)
-      // and price pulls back near MA20 (within 1.5%) and bounces (close > open)
       const isUptrend = ma5 > ma20 * 1.01;
       const nearSupport = Math.abs(prev.low - ma20) / ma20 < 0.015;
       const bounced = prev.close > prev.open && prev.close > ma20;
-      // 增加防飞刀过滤和放量确认
+      // 趋势回调买入点保留放量确认
       if (isUptrend && nearSupport && bounced && isVolumeExpanded) return 'buy';
     }
     return 'hold';
