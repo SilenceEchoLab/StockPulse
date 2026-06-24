@@ -23,7 +23,7 @@ export interface EngineTrade {
   entry: number;
   exit: number;
   returnPct: number;
-  reason: 'tp' | 'sl' | 'expire';
+  reason: 'tp' | 'sl' | 'expire' | 'signal';
   holdDays: number;
   buyVotes: string[];
   regime: string;
@@ -125,14 +125,64 @@ export function backtestRecommendationEngine(
       const stop = Math.max(entry - 2 * atr, entry * (1 - stopPct));
       const take = entry * (1 + tpPct);
 
-      // 结算：D+1 起的真实 K 线，判定止盈/止损/过期
+      // 结算：D+1 起的真实 K 线，判定止盈/止损/过期/信号卖出
       const future = rows.slice(idx + 1, idx + 1 + maxHold);
-      let exitPrice = entry, reason: 'tp' | 'sl' | 'expire' = 'expire', exitDate = D, holdDays = 0;
+      let exitPrice = entry, reason: 'tp' | 'sl' | 'expire' | 'signal' = 'expire', exitDate = D, holdDays = 0;
       let settled = false;
+      
       for (let j = 0; j < future.length; j++) {
         const day = future[j];
+        
         if (safe(day.high) >= take) { exitPrice = take; reason = 'tp'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
         if (safe(day.low) <= stop) { exitPrice = stop; reason = 'sl'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
+        
+        // 强势板块见顶法则：大阴线放量跌破5日线，坚决离场
+        const ma5 = safe(day.ma5);
+        if (ma5 !== null && j > 1) {
+           let volSum = 0, volCount = 0;
+           for (let k = 1; k <= 5; k++) {
+             if (idx + 1 + j - k >= 0) { volSum += rows[idx + 1 + j - k].volume; volCount++; }
+           }
+           const volMa5 = volCount > 0 ? volSum / volCount : day.volume;
+           const isBigYin = day.close < day.open && (day.open - day.close) / day.open > 0.02; // 实体>2%的大阴线
+           if (isBigYin && day.close < ma5 && day.volume > volMa5 * 1.5) {
+              exitPrice = safe(day.close);
+              reason = 'signal';
+              exitDate = day.date;
+              holdDays = j + 1;
+              settled = true;
+              break;
+           }
+        }
+        
+        // 动态信号止损：如果在持仓中途，买入策略产生了明确的卖出信号，则提前截断亏损
+        if (j > 2) { // 至少持仓3天后才允许信号止损，避免刚买入的震荡洗盘
+          // 增加手册核心纪律：MA20 防守线。跌破MA20果断止损/止盈
+          const ma20 = safe(day.ma20);
+          if (ma20 !== null && safe(day.close) < ma20) {
+            exitPrice = safe(day.close);
+            reason = 'signal';
+            exitDate = day.date;
+            holdDays = j + 1;
+            settled = true;
+            break;
+          }
+          
+          let sellVotes = 0;
+          for (const gs of voteStrategies) {
+            if (generateSignal(gs.strategy, { ...gs.params, marketRegime: regime } as BacktestParams, rows, idx + 1 + j) === 'sell') {
+              sellVotes++;
+            }
+          }
+          if (sellVotes > 0) {
+            exitPrice = safe(day.close);
+            reason = 'signal';
+            exitDate = day.date;
+            holdDays = j + 1;
+            settled = true;
+            break;
+          }
+        }
       }
       if (!settled) {
         if (future.length > 0) {

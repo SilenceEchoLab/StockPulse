@@ -13,10 +13,14 @@ const PRIOR_STRENGTH = 20;
 
 const DEFAULT_MAX_HOLD = 30; // 默认最大持仓天数
 
+const safe = (v: number | null | undefined): number | null =>
+  (typeof v === 'number' && isFinite(v)) ? v : null;
+
 export interface ResolveResult {
   resolved: number;
   hitTP: number;
   hitSL: number;
+  hitSignal: number;
   expired: number;
 }
 
@@ -32,7 +36,7 @@ export async function resolveRecommendations(db: any): Promise<ResolveResult> {
     ))
     .all() as any[];
 
-  let hitTP = 0, hitSL = 0, expired = 0;
+  let hitTP = 0, hitSL = 0, hitSignal = 0, expired = 0;
 
   for (const rec of active) {
     if (!rec.entryPrice || rec.entryPrice <= 0) continue;
@@ -82,6 +86,36 @@ export async function resolveRecommendations(db: any): Promise<ResolveResult> {
         resolved = true;
         break;
       }
+      
+      // 强势板块见顶法则：大阴线放量跌破5日线，坚决离场
+      const ma5 = safe(day.ma5);
+      if (ma5 !== null && i > 1) {
+         let volSum = 0, volCount = 0;
+         for (let k = 1; k <= 5; k++) {
+           if (i - k >= 0) { volSum += futureKlines[i - k].volume; volCount++; }
+           else if (entryIdx + 1 + i - k >= 0) { volSum += klines[entryIdx + 1 + i - k].volume; volCount++; }
+         }
+         const volMa5 = volCount > 0 ? volSum / volCount : day.volume;
+         const isBigYin = day.close < day.open && (day.open - day.close) / day.open > 0.02; // 实体>2%的大阴线
+         if (isBigYin && day.close < ma5 && day.volume > volMa5 * 1.5) {
+            resolvedPrice = day.close;
+            status = 'hit_signal';
+            resolved = true;
+            break;
+         }
+      }
+      
+      // 增加手册核心纪律：MA20 防守线。持仓3天后跌破MA20果断止损/止盈
+      if (i > 2) { 
+        const ma20 = safe(day.ma20);
+        if (ma20 !== null && day.close < ma20) {
+          resolvedPrice = day.close;
+          status = 'hit_signal';
+          resolved = true;
+          break;
+        }
+      }
+
       // 时间过期
       if (holdDays >= maxHold) {
         resolvedPrice = day.close;
@@ -103,12 +137,13 @@ export async function resolveRecommendations(db: any): Promise<ResolveResult> {
 
       if (status === 'hit_tp') hitTP++;
       else if (status === 'hit_sl') hitSL++;
+      else if (status === 'hit_signal') hitSignal++;
       else expired++;
     }
   }
 
-  const total = hitTP + hitSL + expired;
-  return { resolved: total, hitTP, hitSL, expired };
+  const total = hitTP + hitSL + hitSignal + expired;
+  return { resolved: total, hitTP, hitSL, hitSignal, expired };
 }
 
 /**
@@ -121,6 +156,7 @@ export async function getPerformanceStats(db: any) {
     resolved: sql`sum(case when status != 'active' then 1 else 0 end)`,
     hitTP: sql`sum(case when status = 'hit_tp' then 1 else 0 end)`,
     hitSL: sql`sum(case when status = 'hit_sl' then 1 else 0 end)`,
+    hitSignal: sql`sum(case when status = 'hit_signal' then 1 else 0 end)`,
     expired: sql`sum(case when status = 'expired' then 1 else 0 end)`,
     avgReturn: sql`avg(case when return_pct is not null then return_pct end)`,
     avgHoldDays: sql`avg(case when hold_days is not null then hold_days end)`,

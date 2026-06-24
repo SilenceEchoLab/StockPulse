@@ -17,14 +17,16 @@ import {
 } from '../db/schema.js';
 import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import {
-  optimizeStock, researchState, resetResearchState, addResearchLog,
-  aggregateGlobalOptima,
+  researchState, resetResearchState, addResearchLog,
+  aggregateGlobalOptima, optimizeStock, type OptimumResult,
 } from '../lib/autoResearch.js';
 import type { StrategyType, BacktestParams } from '../lib/backtestEngine.js';
 import { generateRecommendation } from '../lib/recommender.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
 import { resolveRecommendations, getPerformanceStats, recomputeStrategyCredibility, applyBacktestCredibility } from '../lib/performanceTracker.js';
 import { backtestRecommendationEngine } from '../lib/recommendationBacktest.js';
+import { generateDailyDigest } from '../lib/aiDigest.js';
+import { optimizeWorkerPool } from '../lib/workerPool.js';
 
 const app = new Hono();
 
@@ -88,7 +90,7 @@ app.post('/optimize', async (c) => {
 });
 
 // ── 后台批量优化 ──
-async function runOptimization(db: any, strategies: StrategyType[], maxSamples: number) {
+export async function runOptimization(db: any, strategies: StrategyType[], maxSamples: number) {
   // 读取沪深300作为基准
   const benchmark = await db.select().from(klineDaily)
     .where(eq(klineDaily.marketCode, 'sh000300'))
@@ -106,13 +108,8 @@ async function runOptimization(db: any, strategies: StrategyType[], maxSamples: 
   const pool = await db.select().from(stocksSchema).all();
   const stockCodes = pool.map((s: any) => s.marketCode);
 
-  // 预加载全部股票K线，避免逐只查询
-  const allKlines = await db.select().from(klineDaily).orderBy(asc(klineDaily.date)).all() as any[];
-  const klineMap = new Map<string, any[]>();
-  for (const row of allKlines) {
-    if (!klineMap.has(row.marketCode)) klineMap.set(row.marketCode, []);
-    klineMap.get(row.marketCode)!.push(row);
-  }
+  // Instead of loading all KLines into memory upfront, we'll query them per stock inside the loop
+  // to avoid V8 GC spikes and out-of-memory errors on large datasets.
 
   const totalRuns = strategies.length * stockCodes.length;
   resetResearchState();
@@ -135,18 +132,25 @@ async function runOptimization(db: any, strategies: StrategyType[], maxSamples: 
     const trainReturns: number[] = [];
     const testReturns: number[] = [];
 
-    for (const code of stockCodes) {
-      researchState.strategy = strategy;
-      const rows = klineMap.get(code);
+    const tasks = stockCodes.map(async (code) => {
+      const rows = await db.select().from(klineDaily)
+        .where(eq(klineDaily.marketCode, code))
+        .orderBy(asc(klineDaily.date)).all() as any[];
+
       if (!rows || rows.length < 150) {
         researchState.current++;
-        continue;
+        return;
       }
 
       try {
-        const optimum = optimizeStock(rows, strategy, benchmark, {
-          maxSamples,
-          marketRegime: timing.regime,
+        const optimum = await optimizeWorkerPool.runTask({
+          rows,
+          strategy,
+          benchmark,
+          options: {
+            maxSamples,
+            marketRegime: timing.regime,
+          }
         });
 
         if (optimum) {
@@ -198,7 +202,9 @@ async function runOptimization(db: any, strategies: StrategyType[], maxSamples: 
       if (researchState.current % 20 === 0) {
         addResearchLog(`[${strategy}] ${researchState.current}/${totalRuns} | 盈利方案: ${profitableCount}`);
       }
-    }
+    });
+
+    await Promise.all(tasks);
 
     // 更新运行记录
     const avgTrain = trainReturns.length > 0 ? trainReturns.reduce((a, b) => a + b, 0) / trainReturns.length : 0;
@@ -293,20 +299,48 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
     });
   }
 
-  // 预加载近期K线
-  const allKlines = await db.select().from(klineDaily)
-    .orderBy(asc(klineDaily.date)).all() as any[];
-  const klineMap = new Map<string, any[]>();
-  for (const row of allKlines) {
-    if (!klineMap.has(row.marketCode)) klineMap.set(row.marketCode, []);
-    klineMap.get(row.marketCode)!.push(row);
+  // Instead of preloading all K-lines, we will query them per stock below
+
+  // 宏观层：计算板块资金热图 (Sector Momentum)
+  const pool = await db.select().from(stocksSchema).all() as any[];
+  const industryMap = new Map<string, string>();
+  for (const s of pool) {
+    if (s.industry) industryMap.set(s.marketCode, s.industry);
   }
+
+  const sectorReturns = new Map<string, number[]>();
+  const allStockCodes = Array.from(industryMap.keys());
+  for (const code of allStockCodes) {
+    const rows = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, code))
+      .orderBy(desc(klineDaily.date))
+      .limit(4).all() as any[];
+      
+    if (rows.length >= 4) {
+      // Because we ordered by desc, rows[0] is latest, rows[3] is prev3
+      const latest = rows[0];
+      const prev3 = rows[3];
+      const ret = (latest.close - prev3.close) / prev3.close;
+      const ind = industryMap.get(code) || '未知';
+      if (!sectorReturns.has(ind)) sectorReturns.set(ind, []);
+      sectorReturns.get(ind)!.push(ret);
+    }
+  }
+
+  const sectorMomentum = Array.from(sectorReturns.entries()).map(([ind, rets]) => ({
+    industry: ind,
+    avgReturn: rets.reduce((a, b) => a + b, 0) / rets.length,
+  })).sort((a, b) => b.avgReturn - a.avgReturn);
+
+  const topSectors = new Set(sectorMomentum.slice(0, 3).map(s => s.industry));
 
   const buyRecs: any[] = [];
   let totalAnalyzed = 0;
 
   for (const [code, optima] of optimaByCode) {
-    const rows = klineMap.get(code);
+    const rows = await db.select().from(klineDaily)
+      .where(eq(klineDaily.marketCode, code))
+      .orderBy(asc(klineDaily.date)).all() as any[];
     if (!rows || rows.length < 72) continue;
     totalAnalyzed++;
 
@@ -326,6 +360,11 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
 
     const rec = generateRecommendation(rows, merged, timing.regime, credibility);
     if (rec.action === 'buy' && rec.confidence >= 0.3) {
+      const ind = industryMap.get(code);
+      if (ind && topSectors.has(ind)) {
+        rec.confidence = Math.min(0.95, rec.confidence + 0.20);
+        rec.reason += `\n[板块共振] ${ind}板块为近期强势主线，置信度获得额外溢价加成。`;
+      }
       buyRecs.push(rec);
     }
   }
@@ -486,18 +525,26 @@ app.get('/credibility', async (c) => {
 });
 
 // ── 一键日常闭环（不含耗时的 optimize）── 供 API 与定时调度复用
-// 编排：聚合全局策略 → 生成今日推荐 → 结算历史推荐 → 刷新可信度
+// 编排：聚合全局策略 → 生成今日推荐 → 结算历史推荐 → 刷新可信度 → 生成 AI 每日内参
 // 耗时的参数重优化请用 POST /optimize（完成后会自动聚合+刷新可信度）
-export async function runAutoCycle(db: any) {
+export async function runAutoCycle(c: any, db: any) {
   const aggregate = await aggregateGlobalForAll(db);
   const recommend = await generateTodayRecommendations(db);
   const resolved = await resolveRecommendations(db);
   const credibility = await recomputeStrategyCredibility(db);
-  return {
+  
+  const cycleData = {
     aggregate,
     recommend: recommend.data ?? { message: recommend.message },
     resolved,
     credibility,
+  };
+
+  const digest = await generateDailyDigest(c, cycleData);
+
+  return {
+    ...cycleData,
+    digest,
   };
 }
 
@@ -505,7 +552,7 @@ export async function runAutoCycle(db: any) {
 app.post('/auto-cycle', async (c) => {
   try {
     const db = getDb(c);
-    const data = await runAutoCycle(db);
+    const data = await runAutoCycle(c, db);
     return c.json({ success: true, data });
   } catch (e: any) {
     console.error('Auto-cycle error:', e);
@@ -538,11 +585,18 @@ app.post('/backtest-engine', async (c) => {
     if (benchmark.length < 120) {
       return c.json({ success: false, error: '基准数据不足 120 天，无法回放' });
     }
-    const allKlines = await db.select().from(klineDaily).orderBy(asc(klineDaily.date)).all() as any[];
+    
+    // Lazy query inside backtest engine instead of loading all into map
     const klineMap = new Map<string, any[]>();
-    for (const row of allKlines) {
-      if (!klineMap.has(row.marketCode)) klineMap.set(row.marketCode, []);
-      klineMap.get(row.marketCode)!.push(row);
+    const allStockCodes = (await db.select().from(stocksSchema).all()).map((s:any) => s.marketCode);
+    for (const code of allStockCodes) {
+       // Yield to event loop to avoid blocking during heavy data load
+       await new Promise(resolve => setImmediate(resolve));
+       
+       const rows = await db.select().from(klineDaily)
+        .where(eq(klineDaily.marketCode, code))
+        .orderBy(asc(klineDaily.date)).all() as any[];
+       klineMap.set(code, rows);
     }
 
     // 经回测验证的全局策略（稳定率≥0.3 才参与）

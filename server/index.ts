@@ -133,7 +133,7 @@ async function pollAlerts(env?: any) {
 async function runResearchCycle(env?: any) {
   try {
     const db = getDb(env ? { env } : undefined);
-    return await runAutoCycle(db);
+    return await runAutoCycle(env ? { env } : {} as any, db);
   } catch (e) {
     console.error('Research cycle error:', e);
     return null;

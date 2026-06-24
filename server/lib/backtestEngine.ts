@@ -133,13 +133,82 @@ export function generateSignal(
     return 'hold';
   }
 
+  // 基础过滤与量能确认
+  const ma20 = safe(prev.ma20);
+  const ma60 = safe(prev.ma60);
+  const isBearish = ma20 !== null && ma60 !== null && ma20 < ma60;
+  const isBelowMA60 = ma60 !== null && prev.close < ma60;
+  
+  // 核心风控：任何趋势跟踪策略，严禁在绝对空头排列或 MA60 下方买入
+  // 除非是极左侧的超跌反弹（RSI）。但为了胜率，我们这里做硬隔离。
+  if (strategy !== 'rsi_reversal' && (isBearish || isBelowMA60)) {
+    return 'hold';
+  }
+  
+  // 大盘风控：如果大盘处于熊市，彻底空仓右侧趋势策略，只做左侧
+  const regime = params.marketRegime || 'range';
+  if (regime === 'bear' && strategy !== 'rsi_reversal') {
+    return 'hold';
+  }
+  
+  // 计算 5日均量
+  let volSum = 0;
+  let volCount = 0;
+  for (let k = 1; k <= 5; k++) {
+    if (i - k < 0) break;
+    volSum += rows[i - k].volume;
+    volCount++;
+  }
+  const volMa5 = volCount > 0 ? volSum / volCount : prev.volume;
+  // 放量确认：突破时量比前均量至少 1.5 倍以上
+  const isVolumeExpanded = prev.volume >= volMa5 * 1.5;
+
   if (strategy === 'macd_cross') {
     const macd = safe(prev.macd) ?? 0;
     const sig = safe(prev.macdSignal) ?? 0;
-    const prevMacd = safe(prev2?.macd) ?? 0;
-    const prevSig = safe(prev2?.macdSignal) ?? 0;
-    if (prevMacd <= prevSig && macd > sig) return 'buy';
-    if (prevMacd >= prevSig && macd < sig) return 'sell';
+    
+    // Lookback window: check if a golden cross happened in the last 3 days
+    let recentCross = false;
+    for (let k = 1; k <= 3; k++) {
+      if (i - k - 1 < 0) break;
+      const rCurr = rows[i - k];
+      const rPrev = rows[i - k - 1];
+      const cMacd = safe(rCurr.macd) ?? 0;
+      const cSig = safe(rCurr.macdSignal) ?? 0;
+      const pMacd = safe(rPrev.macd) ?? 0;
+      const pSig = safe(rPrev.macdSignal) ?? 0;
+      if (pMacd <= pSig && cMacd > cSig) {
+        recentCross = true;
+        break;
+      }
+    }
+    
+    // 趋势共振过滤：已在最上方隔离，这里只验证量能和金叉有效性
+    const aboveZero = macd > -0.05;
+    const ma20 = safe(prev.ma20);
+    const ma5 = safe(prev.ma5);
+    const isUptrend = ma20 !== null && prev.close > ma20;
+    // 提高胜率组合：MACD金叉必须伴随 MA5 > MA20
+    const has520Support = ma5 !== null && ma20 !== null && ma5 > ma20;
+    if (recentCross && macd > sig && isVolumeExpanded && aboveZero && isUptrend && has520Support) return 'buy';
+    
+    // Lookback window for death cross
+    let recentDeathCross = false;
+    for (let k = 1; k <= 3; k++) {
+      if (i - k - 1 < 0) break;
+      const rCurr = rows[i - k];
+      const rPrev = rows[i - k - 1];
+      const cMacd = safe(rCurr.macd) ?? 0;
+      const cSig = safe(rCurr.macdSignal) ?? 0;
+      const pMacd = safe(rPrev.macd) ?? 0;
+      const pSig = safe(rPrev.macdSignal) ?? 0;
+      if (pMacd >= pSig && cMacd < cSig) {
+        recentDeathCross = true;
+        break;
+      }
+    }
+    if (recentDeathCross && macd < sig) return 'sell';
+    
     return 'hold';
   }
 
@@ -147,10 +216,11 @@ export function generateSignal(
     const buyT = params.rsiBuy ?? 30;
     const sellT = params.rsiSell ?? 70;
     const rsi = safe(prev.rsi14) ?? 50;
-    // 长期趋势过滤：站上年线(MA250)才允许做多，避免在长期下降通道中抄底
-    const ma250 = safe(prev.ma250);
-    const longTermUp = ma250 !== null ? prev.close > ma250 : true;
-    if (rsi < buyT && longTermUp) return 'buy';
+    // 左侧策略：不再使用迟钝的 MA250，改用 MA60，要求未处于极端空头排列且站上中期趋势
+    // RSI左侧抄底也需要量缩企稳或底部放量，为了高胜率，加上 RSI超卖且量能配合
+    const longTermUp = ma60 !== null ? prev.close > ma60 : true;
+    const rsiBullish = prev.close > prev.open; // 收阳线企稳
+    if (rsi < buyT && longTermUp && !isBearish && rsiBullish) return 'buy';
     if (rsi > sellT) return 'sell';
     return 'hold';
   }
@@ -158,11 +228,38 @@ export function generateSignal(
   if (strategy === 'ma520') {
     const ma5 = safe(prev.ma5);
     const ma20 = safe(prev.ma20);
-    const prevMa5 = safe(prev2?.ma5);
-    const prevMa20 = safe(prev2?.ma20);
-    if (ma5 !== null && ma20 !== null && prevMa5 !== null && prevMa20 !== null) {
-      if (prevMa5 <= prevMa20 && ma5 > ma20) return 'buy';
-      if (prevMa5 >= prevMa20 && ma5 < ma20) return 'sell';
+    
+    if (ma5 !== null && ma20 !== null) {
+      // 1. Lookback window for crossover
+      let recentCross = false;
+      let recentDeathCross = false;
+      for (let k = 1; k <= 3; k++) {
+        if (i - k - 1 < 0) break;
+        const cMa5 = safe(rows[i - k].ma5);
+        const cMa20 = safe(rows[i - k].ma20);
+        const pMa5 = safe(rows[i - k - 1].ma5);
+        const pMa20 = safe(rows[i - k - 1].ma20);
+        if (cMa5 !== null && cMa20 !== null && pMa5 !== null && pMa20 !== null) {
+          if (pMa5 <= pMa20 && cMa5 > cMa20) recentCross = true;
+          if (pMa5 >= pMa20 && cMa5 < cMa20) recentDeathCross = true;
+        }
+      }
+      
+      // 提高胜率组合：520金叉必须伴随 MACD 强势
+      const macd = safe(prev.macd) ?? 0;
+      const sig = safe(prev.macdSignal) ?? 0;
+      const hasMacdSupport = macd > sig;
+      if (recentCross && ma5 > ma20 && isVolumeExpanded && prev.close > ma20 && hasMacdSupport) return 'buy';
+      if (recentDeathCross && ma5 < ma20) return 'sell';
+      
+      // 2. Trend Confirmation & Pullback to Support
+      // If long term trend is up (MA5 > MA20 * 1.01)
+      // and price pulls back near MA20 (within 1.5%) and bounces (close > open)
+      const isUptrend = ma5 > ma20 * 1.01;
+      const nearSupport = Math.abs(prev.low - ma20) / ma20 < 0.015;
+      const bounced = prev.close > prev.open && prev.close > ma20;
+      // 增加防飞刀过滤和放量确认
+      if (isUptrend && nearSupport && bounced && isVolumeExpanded) return 'buy';
     }
     return 'hold';
   }
@@ -243,15 +340,23 @@ export function runBacktest(
 
       // 一字跌停卖不出，跳过当日离场判定
       const lockedDown = isLockLimitDown(code, execDay, prevClose);
+      const isLimitUp = (execDay.close / prevClose - 1) >= limitPctOf(code) - 0.005 && execDay.close === execDay.high;
+
       if (!lockedDown) {
-        if (execDay.low <= effectiveStop) {
+        // A股特供：涨停板信仰 (Limit-Up Override)
+        // 如果今日收盘牢牢封死涨停，且没有开板（close == high），则无视任何移动止盈信号，继续锁仓享受溢价
+        if (isLimitUp) {
+          // 不做任何卖出判定
+        } else if (execDay.low <= effectiveStop) {
           // 触及止损/移动止盈：开盘跳空则按开盘价，否则按止损线
           exitPrice = execDay.open <= effectiveStop ? execDay.open : effectiveStop;
           exitReason = trailingPrice > initialStop ? '移动止盈' : '止损';
         } else if (execDay.high >= takeProfitPrice) {
+          // 触及固定止盈
           exitPrice = execDay.open >= takeProfitPrice ? execDay.open : takeProfitPrice;
           exitReason = '止盈';
         } else if (holdDays >= maxHold) {
+          // 时间止损
           exitPrice = execDay.close;
           exitReason = '时间止损';
         } else {
@@ -282,12 +387,16 @@ export function runBacktest(
 
     // ── 空仓：检查买入信号（T 日信号 → T+1 开盘成交）──
     if (position === 0) {
-      const sig = generateSignal(strategy, params, rows, i);
-      if (sig === 'buy') {
-        // 开盘涨停买不进
-        if (isOpenLimitUp(code, execDay.open, prevClose)) {
-          // 跳过
-        } else {
+      const signal = generateSignal(strategy, params, rows, i);
+      if (signal === 'buy') {
+        const lockedUp = isOpenLimitUp(code, execDay.open, prevClose);
+        
+        // A股特供：T+1 防追高机制 (Gap-Up Skip)
+        // 如果 T+1 日开盘直接高开超过 3%，且不是涨停板，此时追入往往是接盘被套，直接放弃本次交易信号
+        const gapUpPct = (execDay.open - prevClose) / prevClose;
+        const tooHigh = gapUpPct > 0.03;
+
+        if (!lockedUp && !tooHigh) {
           const buyPrice = execDay.open * (1 + slippage);
           const budget = cash * positionPct;
           const maxAffordable = Math.floor(budget / (buyPrice * (1 + fees.buy)));

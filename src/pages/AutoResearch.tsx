@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { FlaskConical, Play, TrendingUp, Target, Award, RefreshCw, Zap, CheckCircle2, AlertCircle, Clock, Globe2, ShieldCheck, Sparkles, Trophy, Activity } from "lucide-react";
 import { cn } from "../lib/utils";
+import { KLineChart } from "../components/KLineChart";
 
 type Status = 'idle' | 'running' | 'completed' | 'error';
 
@@ -28,6 +29,7 @@ interface Recommendation {
   returnPct: number | null;
   holdDays: number | null;
   date: string;
+  strategyDetail?: string;
 }
 
 interface PerfStats {
@@ -37,6 +39,7 @@ interface PerfStats {
     resolved: number;
     hitTP: number;
     hitSL: number;
+    hitSignal?: number;
     expired: number;
     avgReturn: number | null;
     avgHoldDays: number | null;
@@ -109,6 +112,9 @@ export default function AutoResearch() {
   const [recommending, setRecommending] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [recTab, setRecTab] = useState<'active' | 'resolved'>('active');
+  const [aiDigest, setAiDigest] = useState<string | null>(null);
+  const [expandedRecId, setExpandedRecId] = useState<number | null>(null);
+  const [klineDataMap, setKlineDataMap] = useState<Record<string, any[]>>({});
 
   // 推荐引擎历史回放
   const [backtesting, setBacktesting] = useState(false);
@@ -133,6 +139,26 @@ export default function AutoResearch() {
       if (json.success) setRecs(json.data || []);
     } catch { /* ignore */ }
   }, [recTab]);
+
+  const loadKlineForRec = async (marketCode: string) => {
+    if (klineDataMap[marketCode]) return;
+    try {
+      const res = await fetch(`/api/kline/${marketCode}?period=daily&limit=100`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        setKlineDataMap(prev => ({ ...prev, [marketCode]: json.data }));
+      }
+    } catch { /* ignore */ }
+  };
+
+  const handleRowClick = (rec: Recommendation) => {
+    if (expandedRecId === rec.id) {
+      setExpandedRecId(null);
+    } else {
+      setExpandedRecId(rec.id);
+      loadKlineForRec(rec.marketCode);
+    }
+  };
 
   const fetchPerf = useCallback(async () => {
     try {
@@ -199,18 +225,29 @@ export default function AutoResearch() {
       const res = await fetch('/api/research/recommend', { method: 'POST' });
       const json = await res.json();
       if (json.success) {
+        alert(`成功生成推荐！发现 ${json.data?.recommended || 0} 个符合条件的交易信号。`);
         fetchRecs(); fetchPerf();
       } else {
         alert(json.message || json.error || '生成推荐失败');
       }
+    } catch (e: any) {
+      alert('网络错误: ' + e.message);
     } finally { setRecommending(false); }
   };
 
   const resolveRecs = async () => {
     setResolving(true);
     try {
-      await fetch('/api/research/resolve', { method: 'POST' });
-      fetchRecs(); fetchPerf(); fetchCred();
+      const res = await fetch('/api/research/resolve', { method: 'POST' });
+      const json = await res.json();
+      if (json.success) {
+        alert(`结算完成！本次结算 ${json.data?.resolvedCount || 0} 条推荐。`);
+        fetchRecs(); fetchPerf(); fetchCred();
+      } else {
+        alert(json.error || '结算失败');
+      }
+    } catch (e: any) {
+      alert('网络错误: ' + e.message);
     } finally { setResolving(false); }
   };
 
@@ -246,10 +283,21 @@ export default function AutoResearch() {
       const res = await fetch('/api/research/auto-cycle', { method: 'POST' });
       const json = await res.json();
       if (json.success) {
+        const msg = json.data?.recommend?.message || json.data?.recommend?.error;
+        if (msg) {
+          alert(`闭环执行完毕！提示: ${msg}`);
+        } else {
+          alert(`一键闭环执行成功！聚合完成并生成了新的策略推荐。`);
+        }
+        if (json.data?.digest) {
+          setAiDigest(json.data.digest);
+        }
         fetchGlobal(); fetchCred(); fetchRecs(); fetchPerf();
       } else {
         alert(json.error || '闭环执行失败');
       }
+    } catch (e: any) {
+      alert('网络错误: ' + e.message);
     } finally { setCycling(false); }
   };
 
@@ -349,9 +397,10 @@ export default function AutoResearch() {
             <MetricCard label="平均收益" value={`${avgRetPct}%`} color={o?.avgReturn != null && o.avgReturn > 0 ? 'text-green-400' : 'text-red-400'} />
             <MetricCard label="平均持仓" value={`${o?.avgHoldDays != null ? Math.round(o.avgHoldDays) : 0}天`} />
           </div>
-          <div className="mt-3 flex gap-2 text-xs">
+          <div className="mt-3 flex gap-2 text-xs flex-wrap">
             <span className="flex items-center gap-1 text-green-400"><CheckCircle2 className="w-3 h-3" />止盈 {o?.hitTP ?? 0}</span>
             <span className="flex items-center gap-1 text-red-400"><AlertCircle className="w-3 h-3" />止损 {o?.hitSL ?? 0}</span>
+            <span className="flex items-center gap-1 text-orange-400"><AlertCircle className="w-3 h-3" />纪律离场 {o?.hitSignal ?? 0}</span>
             <span className="flex items-center gap-1 text-muted"><Clock className="w-3 h-3" />过期 {o?.expired ?? 0}</span>
           </div>
         </div>
@@ -438,6 +487,18 @@ export default function AutoResearch() {
           )}
         </div>
       </div>
+      {/* AI 内参展示 */}
+      {aiDigest && (
+        <div className="bg-gradient-to-br from-indigo-900/20 to-purple-900/10 rounded-xl p-5 border border-indigo-500/30 shadow-inner mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles className="w-5 h-5 text-indigo-400" />
+            <h2 className="text-lg font-semibold text-white">AI 今日量化内参</h2>
+          </div>
+          <div className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
+            {aiDigest}
+          </div>
+        </div>
+      )}
 
       {/* 推荐引擎历史回放 —— 验证全局策略组合的历史实战盈利能力 */}
       <div className="bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
@@ -678,32 +739,76 @@ export default function AutoResearch() {
               </thead>
               <tbody>
                 {recs.map((r) => (
-                  <tr key={r.id} className="border-b border-hairline-dark/50 hover:bg-canvas-dark/50">
-                    <td className="px-4 py-2.5">
-                      <div className="text-white font-medium">{r.name}</div>
-                      <div className="text-muted text-xs">{r.marketCode}</div>
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <span className={cn('px-2 py-0.5 rounded text-xs font-bold', r.confidence >= 0.6 ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400')}>
-                        {(r.confidence * 100).toFixed(0)}%
-                      </span>
-                    </td>
-                    <td className="px-4 py-2.5 text-right text-white">{r.entryPrice?.toFixed(2) ?? '-'}</td>
-                    <td className="px-4 py-2.5 text-right text-red-400">{r.stopLoss?.toFixed(2) ?? '-'}</td>
-                    <td className="px-4 py-2.5 text-right text-green-400">{r.takeProfit?.toFixed(2) ?? '-'}</td>
-                    {recTab === 'resolved' && (
-                      <td className={cn('px-4 py-2.5 text-right font-bold', (r.returnPct ?? 0) > 0 ? 'text-green-400' : 'text-red-400')}>
-                        {((r.returnPct ?? 0) * 100).toFixed(1)}%
+                  <React.Fragment key={r.id}>
+                    <tr 
+                      className={cn("border-b border-hairline-dark/50 hover:bg-canvas-dark/50 cursor-pointer", expandedRecId === r.id ? "bg-surface-dark" : "")}
+                      onClick={() => handleRowClick(r)}
+                    >
+                      <td className="px-4 py-2.5">
+                        <div className="text-white font-medium">{r.name}</div>
+                        <div className="text-muted text-xs">{r.marketCode}</div>
                       </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <span className={cn('px-2 py-0.5 rounded text-xs font-bold', r.confidence >= 0.6 ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400')}>
+                          {(r.confidence * 100).toFixed(0)}%
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-white">{r.entryPrice?.toFixed(2) ?? '-'}</td>
+                      <td className="px-4 py-2.5 text-right text-red-400">{r.stopLoss?.toFixed(2) ?? '-'}</td>
+                      <td className="px-4 py-2.5 text-right text-green-400">{r.takeProfit?.toFixed(2) ?? '-'}</td>
+                      {recTab === 'resolved' && (
+                        <td className={cn('px-4 py-2.5 text-right font-bold', (r.returnPct ?? 0) > 0 ? 'text-green-400' : 'text-red-400')}>
+                          {((r.returnPct ?? 0) * 100).toFixed(1)}%
+                        </td>
+                      )}
+                      {recTab === 'resolved' && (
+                        <td className="px-4 py-2.5 text-right text-muted">{r.holdDays ?? 0}天</td>
+                      )}
+                      <td className="px-4 py-2.5 text-muted text-xs max-w-[200px] truncate">{r.reason}</td>
+                      <td className="px-4 py-2.5 text-center">
+                        <StatusBadge status={r.status} />
+                      </td>
+                    </tr>
+                    {expandedRecId === r.id && (
+                      <tr className="bg-surface-dark border-b border-hairline-dark/50">
+                        <td colSpan={recTab === 'resolved' ? 9 : 7} className="p-4">
+                          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                            <div className="lg:col-span-2 h-[300px] bg-canvas-dark rounded-lg border border-hairline-dark overflow-hidden p-2">
+                              {klineDataMap[r.marketCode] ? (
+                                <KLineChart 
+                                  data={klineDataMap[r.marketCode]} 
+                                  activeIndicator="MACD" 
+                                  period="daily" 
+                                />
+                              ) : (
+                                <div className="h-full flex items-center justify-center text-muted text-sm animate-pulse">
+                                  加载图表中...
+                                </div>
+                              )}
+                            </div>
+                            <div className="bg-canvas-dark rounded-lg border border-hairline-dark p-4 flex flex-col gap-3">
+                              <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                                <Target className="w-4 h-4 text-primary" />
+                                买点分析诊断
+                              </h4>
+                              <div className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed">
+                                {r.reason}
+                              </div>
+                              <div className="mt-auto space-y-2">
+                                <div className="flex justify-between text-xs text-muted">
+                                  <span>净置信度 (Net Conviction)</span>
+                                  <span className="text-white font-medium">{(r.confidence * 100).toFixed(1)}%</span>
+                                </div>
+                                <div className="h-1.5 bg-black/30 rounded-full overflow-hidden">
+                                  <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, r.confidence * 100)}%` }} />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
                     )}
-                    {recTab === 'resolved' && (
-                      <td className="px-4 py-2.5 text-right text-muted">{r.holdDays ?? 0}天</td>
-                    )}
-                    <td className="px-4 py-2.5 text-muted text-xs max-w-[200px] truncate">{r.reason}</td>
-                    <td className="px-4 py-2.5 text-center">
-                      <StatusBadge status={r.status} />
-                    </td>
-                  </tr>
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
@@ -726,8 +831,9 @@ function MetricCard({ label, value, color }: { label: string; value: string | nu
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
     active: { label: '活跃', cls: 'bg-blue-500/20 text-blue-400' },
-    hit_tp: { label: '止盈', cls: 'bg-green-500/20 text-green-400' },
-    hit_sl: { label: '止损', cls: 'bg-red-500/20 text-red-400' },
+    hit_tp: { label: '正常止盈', cls: 'bg-green-500/20 text-green-400' },
+    hit_sl: { label: '传统止损', cls: 'bg-red-500/20 text-red-400' },
+    hit_signal: { label: '纪律离场(破线/见顶)', cls: 'bg-orange-500/20 text-orange-400' },
     expired: { label: '过期', cls: 'bg-gray-500/20 text-gray-400' },
     closed: { label: '平仓', cls: 'bg-gray-500/20 text-gray-400' },
   };
