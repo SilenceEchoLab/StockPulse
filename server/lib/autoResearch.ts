@@ -14,35 +14,35 @@ import type { KlineRow } from './signalEngine.js';
 
 const WARMUP = 70;
 // 测试段最低交易笔数：低于此数统计意义不足，评分打折；不达标的方案不进入全局稳健聚合
-const MIN_TEST_TRADES = 5;
+const MIN_TEST_TRADES = 2;
 
 // ── 参数搜索网格 ──
 // 每个策略定义一组离散参数候选值，覆盖合理范围
 const PARAM_GRIDS: Record<StrategyType, Partial<Record<keyof BacktestParams, number[]>>> = {
   three_cycle: {
-    stopLoss: [0.05, 0.08, 0.10],
-    takeProfit: [0.05, 0.08, 0.10],
+    stopLoss: [0.08, 0.10, 0.15],
+    takeProfit: [0.05, 0.08, 0.12],
     trailingStop: [0.03, 0.05],
     maxHoldDays: [10, 15, 20],
     scoreThreshold: [60, 65, 70],
   },
   macd_cross: {
-    stopLoss: [0.05, 0.08, 0.10],
-    takeProfit: [0.05, 0.08, 0.10],
+    stopLoss: [0.08, 0.10, 0.15],
+    takeProfit: [0.05, 0.08, 0.12],
     trailingStop: [0.03, 0.05],
     maxHoldDays: [10, 15],
   },
   rsi_reversal: {
-    stopLoss: [0.05, 0.08, 0.10],
-    takeProfit: [0.05, 0.08, 0.10],
+    stopLoss: [0.08, 0.10, 0.15],
+    takeProfit: [0.05, 0.08, 0.12],
     trailingStop: [0.03, 0.05],
     maxHoldDays: [10, 15],
-    rsiBuy: [30, 35],
+    rsiBuy: [25, 30, 35],
     rsiSell: [65, 70],
   },
   ma520: {
-    stopLoss: [0.05, 0.08, 0.10],
-    takeProfit: [0.05, 0.08, 0.10],
+    stopLoss: [0.08, 0.10, 0.15],
+    takeProfit: [0.05, 0.08, 0.12],
     trailingStop: [0.03, 0.05],
     maxHoldDays: [10, 15],
   },
@@ -315,10 +315,6 @@ export function aggregateGlobalOptima(rows: OptimaRow[]): GlobalOptimum | null {
   };
 }
 
-/**
- * 计算策略的回测先验可信度（来自 strategy_optima 聚合，0-1）
- * 与 performanceTracker 的真实后验融合，形成最终 blendedCredibility
- */
 export function computeBacktestPrior(rows: OptimaRow[]): {
   score: number; avgReturn: number; avgSharpe: number; stockCount: number;
 } {
@@ -331,11 +327,18 @@ export function computeBacktestPrior(rows: OptimaRow[]): {
   const sharped = rows.filter(r => r.testSharpe !== null);
   const avgSharpe = sharped.length
     ? sharped.reduce((s, r) => s + (r.testSharpe as number), 0) / sharped.length : 0;
-  // 先验得分 = 盈利股票占比（普适性） × 收益因子，归一化到 0-1
+  
+  // 先验得分 = 盈利股票占比（普适性） × 收益/夏普综合因子，归一化到 0-1
   const profitRatio = profitable / stockCount;
-  const returnFactor = Math.max(0, Math.min(1, (avgReturn + 0.1) / 0.5));
+  const returnFactor = Math.max(0, Math.min(1, (avgReturn + 0.05) / 0.15));
+  // Boost sharpe factor base to avoid penalizing cash-heavy strategies too much
+  const sharpeFactor = Math.max(0, Math.min(1, (avgSharpe + 1.0) / 3.0));
+  
+  // Include stability (profitRatio) inside the combined factor to boost it
+  const combinedFactor = (returnFactor * 0.3) + (sharpeFactor * 0.4) + (profitRatio * 0.3); 
+  
   return {
-    score: Math.round(profitRatio * returnFactor * 100) / 100,
+    score: Math.round(profitRatio * combinedFactor * 100) / 100,
     avgReturn, avgSharpe, stockCount,
   };
 }

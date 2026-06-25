@@ -139,15 +139,15 @@ export function generateSignal(
   const isBearish = ma20 !== null && ma60 !== null && ma20 < ma60;
   const isBelowMA60 = ma60 !== null && prev.close < ma60;
   
-  // 核心风控：任何趋势跟踪策略，严禁在绝对空头排列或 MA60 下方买入
-  // 除非是极左侧的超跌反弹（RSI）。但为了胜率，我们这里做硬隔离。
-  if (strategy !== 'rsi_reversal' && (isBearish || isBelowMA60)) {
+  // 核心风控：严禁在绝对空头排列或 MA60 下方买入
+  // 除非是极左侧的超跌反弹（RSI）或者 MACD 底部反转
+  if (strategy !== 'rsi_reversal' && strategy !== 'macd_cross' && (isBearish || isBelowMA60)) {
     return 'hold';
   }
   
   // 大盘风控：如果大盘处于熊市，彻底空仓右侧趋势策略，只做左侧
   const regime = params.marketRegime || 'range';
-  if (regime === 'bear' && strategy !== 'rsi_reversal') {
+  if (regime === 'bear' && strategy !== 'rsi_reversal' && strategy !== 'macd_cross') {
     return 'hold';
   }
   
@@ -182,11 +182,9 @@ export function generateSignal(
         break;
       }
     }
-    
-    const aboveZero = macd > -0.05; // 稍微放宽 0 轴要求
-    const bullishDay = prev.close > prev.open; // 阳线确认
-    // 移除 isUptrend (close > ma20)，因为 MACD 金叉通常在价格突破均线前发生！解决时序错配问题。
-    if (recentCross && macd > sig && isVolumeExpanded && aboveZero && bullishDay) return 'buy';
+    // MACD Cross with momentum and slight volume expansion
+    const isVolumeBump = prev.volume > volMa5 * 1.1;
+    if (recentCross && macd > sig && isVolumeBump) return 'buy';
     
     let recentDeathCross = false;
     for (let k = 1; k <= 3; k++) {
@@ -214,9 +212,8 @@ export function generateSignal(
     const rsiTurningUp = rsi > prevRsi; 
     const volMa5_ = safe(prev.volMa5) ?? prev.volume;
     const panicStopping = prev.volume < volMa5_ * 2;
-    const rsiBullish = prev.close > prev.open; 
     
-    if (rsi < buyT && rsiBullish && rsiTurningUp && panicStopping) return 'buy';
+    if (rsi < buyT && rsiTurningUp && panicStopping) return 'buy';
     if (rsi > sellT) return 'sell';
     return 'hold';
   }
@@ -241,21 +238,27 @@ export function generateSignal(
         }
       }
       
-      const macd = safe(prev.macd) ?? 0;
-      const sig = safe(prev.macdSignal) ?? 0;
-      const hasMacdSupport = macd > sig;
+      const ma20Rising = ma20 >= prevMa20 * 0.995; 
       
-      const ma20Rising = ma20 >= prevMa20 * 0.998; 
-      
-      // 移除 isVolumeExpanded 限制，因为均线金叉是滞后指标，突破日大概率不在金叉这3天内，强制放量会导致错过大量真实金叉！
-      if (recentCross && ma5 > ma20 && prev.close > ma20 && hasMacdSupport && ma20Rising) return 'buy';
+      // Calculate a localized 5-day volume MA instead of global volMa5 if we can
+      let volSum = 0;
+      let volCount = 0;
+      for (let k = 1; k <= 5; k++) {
+        if (i - k < 0) break;
+        volSum += rows[i - k].volume;
+        volCount++;
+      }
+      const localVolMa5 = volCount > 0 ? volSum / volCount : prev.volume;
+      const isVolumeBump = prev.volume >= localVolMa5 * 1.05;
+
+      // 只要 520 金叉且 MA20 没有极速下跌，且略微放量
+      if (recentCross && ma5 > ma20 && ma20Rising && isVolumeBump) return 'buy';
       if (recentDeathCross && ma5 < ma20) return 'sell';
       
       const isUptrend = ma5 > ma20 * 1.01;
       const nearSupport = Math.abs(prev.low - ma20) / ma20 < 0.015;
       const bounced = prev.close > prev.open && prev.close > ma20;
-      // 趋势回调买入点保留放量确认
-      if (isUptrend && nearSupport && bounced && isVolumeExpanded) return 'buy';
+      if (isUptrend && nearSupport && bounced) return 'buy';
     }
     return 'hold';
   }
