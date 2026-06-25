@@ -17,6 +17,9 @@ export default function MarketOverview() {
     refreshInterval: 60_000,
     revalidateOnFocus: true,
   });
+  // 大盘择时（手册 STEP1）：决定仓位上限，作为每日决策锚点
+  const { data: timingData } = useSWR("/api/market/timing?code=sh000300", fetcher, { refreshInterval: 60_000 });
+  const timing = timingData?.data;
 
   const overview = data?.data;
 
@@ -71,6 +74,49 @@ export default function MarketOverview() {
           );
         })}
       </div>
+
+      {/* 大盘择时：今日仓位决策锚点（手册 STEP1） */}
+      {timing && (
+        <Card variant="card-dark" className="p-4 mb-4 shrink-0">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-[14px] font-medium text-white flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-primary" /> 大盘择时 · 今日仓位决策
+            </h3>
+            <span className="text-[11px] text-muted">沪深300 · {timing.asOf}</span>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 items-center">
+            <div>
+              <div className="text-[11px] text-muted mb-1">大盘环境</div>
+              <div className={cn("text-[17px] font-semibold leading-tight", timing.regime === 'bull' ? 'text-trading-up' : timing.regime === 'bear' ? 'text-trading-down' : 'text-yellow-400')}>
+                {timing.regimeLabel}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-muted mb-1">仓位上限</div>
+              <div className="text-[18px] font-mono font-semibold text-white">{Math.round(timing.maxPosition * 100)}%</div>
+              <div className="w-full h-1.5 bg-surface-elevated-dark rounded-full mt-1.5 overflow-hidden">
+                <div className="bg-primary h-full" style={{ width: `${timing.maxPosition * 100}%` }} />
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-muted mb-1">共振评分</div>
+              <div className="text-[18px] font-mono font-semibold text-white">{timing.score > 0 ? '+' : ''}{timing.score}</div>
+              <div className="text-[11px] text-muted">多 {timing.bullishCount} / 空 {timing.bearishCount}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-muted mb-1">四指标共振</div>
+              <div className="flex flex-wrap gap-1">
+                {timing.signals?.map((s: any) => (
+                  <span key={s.name} className={cn("text-[10px] px-1.5 py-0.5 rounded", s.status === 'bull' ? 'bg-trading-up/15 text-trading-up' : s.status === 'bear' ? 'bg-trading-down/15 text-trading-down' : 'bg-surface-elevated-dark text-muted')}>
+                    {s.name}{s.score > 0 ? '↑' : s.score < 0 ? '↓' : ''}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+          <p className="text-[12px] text-body-dark mt-3 pt-3 border-t border-hairline-dark">{timing.suggestion}</p>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4 shrink-0">
         {/* 市场温度计 */}

@@ -99,7 +99,7 @@ export default function Layout() {
       title: "核心功能",
       items: [
         { name: "投资大盘", path: "/", icon: LayoutDashboard },
-        { name: "核心股池", path: "/pool", icon: Database },
+        { name: "我的自选", path: "/pool", icon: Database },
         { name: "AI选股", path: "/ai-picks", icon: Cpu },
         { name: "策略回测", path: "/backtest", icon: Activity },
         { name: "AutoResearch", path: "/research", icon: FlaskConical },

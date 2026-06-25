@@ -105,6 +105,9 @@ export default function Backtest() {
           <p className="text-[13px] text-muted">
             三周期共振 + 大盘择时 + 完整风控的量化回测系统
           </p>
+          <p className="text-[11px] text-muted mt-1">
+            单策略·单股回测（本页）。多策略组合 + 组合级风控的历史回放，见 <span className="text-primary">AutoResearch 自动优化引擎</span>
+          </p>
         </div>
         {result?.marketTiming && (
           <div className="flex items-center gap-2 bg-surface-card-dark border border-hairline-dark rounded-lg px-4 py-2">
