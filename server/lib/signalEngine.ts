@@ -3,6 +3,8 @@
 // 输入: 最近N天的日K数据(含OHLCV + 技术指标)
 // 输出: 0-100综合评分 + 结构化买卖信号列表
 
+import { sma, safe } from './indicatorUtil.js';
+
 export interface KlineRow {
   date: string;
   open: number;
@@ -49,20 +51,6 @@ export interface ScoreResult {
   score: number;
   signals: SignalItem[];
   breakdown: ScoreBreakdown;
-}
-
-// 从收盘价序列计算简单移动平均（DB 无 MA 字段时的降级方案）
-function sma(values: number[], period: number): number | null {
-  if (values.length < period) return null;
-  let sum = 0;
-  for (let i = values.length - period; i < values.length; i++) {
-    sum += values[i];
-  }
-  return sum / period;
-}
-
-function safe(val: number | null | undefined): number | null {
-  return (typeof val === 'number' && isFinite(val)) ? val : null;
 }
 
 /**
@@ -532,6 +520,49 @@ export function detectSignals(rows: KlineRow[]): FullSignalReport {
   // 6. 放量滞涨(出货信号)
   if (last.volume > avgVol5 * 1.5 && Math.abs(price - last.open) / last.open < 0.01) {
     sellSignals.push({ name: '放量滞涨', detail: '成交量放大但价格不涨,主力出货特征,卖出', urgency: 'high' });
+  }
+
+  // 6b. 价跌量增(放量下跌) —— 量价四象限「抛压加重」：高位→出货
+  const priceDown = price < (prev?.close ?? price);
+  if (priceDown && last.volume > avgVol5 * 1.5) {
+    const highPos = ma20 !== null && price / ma20 > 1.1;
+    sellSignals.push({
+      name: highPos ? '高位放量下跌' : '放量下跌',
+      detail: `价跌量增(量比>${(last.volume / avgVol5).toFixed(1)}),抛压加重${highPos ? ',高位出货特征' : ''},减仓/离场`,
+      urgency: highPos ? 'high' : 'medium',
+    });
+  }
+
+  // 6c. 价涨量缩(量价背离) —— 量价四象限「上涨乏力/诱多」
+  if (!priceDown && price > (prev?.close ?? price) && last.volume < avgVol5 * 0.7) {
+    sellSignals.push({ name: '量价背离', detail: '价涨量缩,上涨乏力或诱多,警惕回调', urgency: 'low' });
+  }
+
+  // 6d. 天量天价 / 地量见地价（手册：量能极端，流动性信号）
+  if (rows.length >= 60) {
+    const recent60 = rows.slice(-60);
+    const avgVol60 = recent60.reduce((s, r) => s + r.volume, 0) / 60;
+    const high60 = Math.max(...recent60.map(r => r.high));
+    // 天量天价：量 > 2×60日均 且 价接近 60 日高点 → 见顶卖出
+    if (avgVol60 > 0 && last.volume > avgVol60 * 2 && price >= high60 * 0.98) {
+      sellSignals.push({ name: '天量天价', detail: `量能${(last.volume / avgVol60).toFixed(1)}倍于60日均且价近新高,天量见天价,见顶信号`, urgency: 'high' });
+    }
+    // 地量见地价：量 < 0.5×60日均 → 抛压衰竭,关注底部反弹
+    if (avgVol60 > 0 && last.volume < avgVol60 * 0.5) {
+      buySignals.push({ name: '地量见地价', detail: `量能萎缩至60日均的${(last.volume / avgVol60).toFixed(2)}倍,抛压衰竭,关注底部`, confidence: 0.6 });
+    }
+  }
+
+  // 6e. 连板梯队（情绪周期，手册附录龙头战法）：连续涨停识别情绪阶段
+  let limitStreak = 0;
+  for (let k = rows.length - 1; k >= 0; k--) {
+    const pc = safe(rows[k].pctChg);
+    if (pc !== null && pc >= 9.5) limitStreak++; else break;
+  }
+  if (limitStreak >= 2) {
+    const level = limitStreak >= 5 ? 'danger' : limitStreak >= 3 ? 'warning' : 'caution';
+    const phase = limitStreak >= 5 ? '情绪高潮,炸板增多,准备收割' : limitStreak >= 3 ? '加速期,控仓防过热' : '启动期,小仓试水';
+    riskTags.push({ name: `${limitStreak}连板`, level, detail: `连续${limitStreak}日涨停,${phase}` });
   }
 
   // 7. 520战法死叉(MA5下穿MA20)

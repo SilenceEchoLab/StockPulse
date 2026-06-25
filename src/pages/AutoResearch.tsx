@@ -24,6 +24,7 @@ interface Recommendation {
   entryPrice: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
+  positionSize?: number | null;   // 建议持仓股数（头寸反推）
   reason: string;
   status: string;
   returnPct: number | null;
@@ -104,7 +105,7 @@ const PARAM_LABEL: Record<string, string> = {
 export default function AutoResearch() {
   const [optimizing, setOptimizing] = useState(false);
   const [status, setStatus] = useState<ResearchStatus | null>(null);
-  const [recs, setRecs] = useState<Recommendation[]>([]);
+  const [allRecs, setAllRecs] = useState<{ active: Recommendation[]; resolved: Recommendation[] }>({ active: [], resolved: [] });
   const [perf, setPerf] = useState<PerfStats | null>(null);
   const [globalOptima, setGlobalOptima] = useState<GlobalOptima[]>([]);
   const [cred, setCred] = useState<StrategyCred[]>([]);
@@ -112,6 +113,7 @@ export default function AutoResearch() {
   const [recommending, setRecommending] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [recTab, setRecTab] = useState<'active' | 'resolved'>('active');
+  const recs = allRecs[recTab];   // 当前 tab 的推荐列表（双 tab 缓存，计数各自独立）
   const [aiDigest, setAiDigest] = useState<string | null>(null);
   const [expandedRecId, setExpandedRecId] = useState<number | null>(null);
   const [klineDataMap, setKlineDataMap] = useState<Record<string, any[]>>({});
@@ -134,11 +136,18 @@ export default function AutoResearch() {
 
   const fetchRecs = useCallback(async () => {
     try {
-      const res = await fetch(`/api/research/recommendations?status=${recTab}&limit=50`);
-      const json = await res.json();
-      if (json.success) setRecs(json.data || []);
+      // 一次拉取 active + resolved 双列表，分别缓存——切换 tab 不重查、计数各自准确
+      const [aRes, rRes] = await Promise.all([
+        fetch('/api/research/recommendations?status=active&limit=50'),
+        fetch('/api/research/recommendations?status=resolved&limit=50'),
+      ]);
+      const [aJson, rJson] = await Promise.all([aRes.json(), rRes.json()]);
+      setAllRecs({
+        active: aJson.success ? (aJson.data || []) : [],
+        resolved: rJson.success ? (rJson.data || []) : [],
+      });
     } catch { /* ignore */ }
-  }, [recTab]);
+  }, []);
 
   const loadKlineForRec = async (marketCode: string) => {
     if (klineDataMap[marketCode]) return;
@@ -705,13 +714,13 @@ export default function AutoResearch() {
             onClick={() => setRecTab('active')}
             className={cn('px-5 py-3 text-sm font-medium transition-colors', recTab === 'active' ? 'text-primary border-b-2 border-primary' : 'text-muted hover:text-white')}
           >
-            活跃推荐 ({recs.length})
+            活跃推荐 ({allRecs.active.length})
           </button>
           <button
             onClick={() => setRecTab('resolved')}
             className={cn('px-5 py-3 text-sm font-medium transition-colors', recTab === 'resolved' ? 'text-primary border-b-2 border-primary' : 'text-muted hover:text-white')}
           >
-            已结算 ({recs.length})
+            已结算 ({allRecs.resolved.length})
           </button>
         </div>
 
@@ -731,6 +740,8 @@ export default function AutoResearch() {
                   <th className="px-4 py-2 text-right">买入价</th>
                   <th className="px-4 py-2 text-right">止损</th>
                   <th className="px-4 py-2 text-right">止盈</th>
+                  <th className="px-4 py-2 text-right">盈亏比</th>
+                  <th className="px-4 py-2 text-right">建议仓位</th>
                   {recTab === 'resolved' && <th className="px-4 py-2 text-right">收益</th>}
                   {recTab === 'resolved' && <th className="px-4 py-2 text-right">持仓</th>}
                   <th className="px-4 py-2 text-left">理由</th>
@@ -738,9 +749,13 @@ export default function AutoResearch() {
                 </tr>
               </thead>
               <tbody>
-                {recs.map((r) => (
+                {recs.map((r) => {
+                  // 盈亏比来自 strategyDetail（research.ts 写入）
+                  const sd = (() => { try { return r.strategyDetail ? JSON.parse(r.strategyDetail) : {}; } catch { return {}; } })();
+                  const rr = typeof sd.riskReward === 'number' ? sd.riskReward : null;
+                  return (
                   <React.Fragment key={r.id}>
-                    <tr 
+                    <tr
                       className={cn("border-b border-hairline-dark/50 hover:bg-canvas-dark/50 cursor-pointer", expandedRecId === r.id ? "bg-surface-dark" : "")}
                       onClick={() => handleRowClick(r)}
                     >
@@ -756,6 +771,10 @@ export default function AutoResearch() {
                       <td className="px-4 py-2.5 text-right text-white">{r.entryPrice?.toFixed(2) ?? '-'}</td>
                       <td className="px-4 py-2.5 text-right text-red-400">{r.stopLoss?.toFixed(2) ?? '-'}</td>
                       <td className="px-4 py-2.5 text-right text-green-400">{r.takeProfit?.toFixed(2) ?? '-'}</td>
+                      <td className={cn('px-4 py-2.5 text-right font-medium', rr === null ? 'text-muted' : rr >= 2 ? 'text-green-400' : rr >= 1.5 ? 'text-yellow-400' : 'text-red-400')}>
+                        {rr !== null ? `${rr.toFixed(2)}:1` : '-'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-body-dark text-xs">{r.positionSize ? `${r.positionSize}股` : '-'}</td>
                       {recTab === 'resolved' && (
                         <td className={cn('px-4 py-2.5 text-right font-bold', (r.returnPct ?? 0) > 0 ? 'text-green-400' : 'text-red-400')}>
                           {((r.returnPct ?? 0) * 100).toFixed(1)}%
@@ -771,7 +790,7 @@ export default function AutoResearch() {
                     </tr>
                     {expandedRecId === r.id && (
                       <tr className="bg-surface-dark border-b border-hairline-dark/50">
-                        <td colSpan={recTab === 'resolved' ? 9 : 7} className="p-4">
+                        <td colSpan={recTab === 'resolved' ? 11 : 9} className="p-4">
                           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                             <div className="lg:col-span-2 h-[300px] bg-canvas-dark rounded-lg border border-hairline-dark overflow-hidden p-2">
                               {klineDataMap[r.marketCode] ? (
@@ -809,7 +828,8 @@ export default function AutoResearch() {
                       </tr>
                     )}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

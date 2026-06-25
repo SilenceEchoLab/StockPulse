@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { Play, Activity, Download, HardDrive, ShieldCheck, Database, RefreshCw, Trash2, Settings2 } from "lucide-react";
+import { Play, Activity, Download, HardDrive, ShieldCheck, Database, RefreshCw, Settings2 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -18,8 +18,28 @@ interface SyncState {
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState(0);
-  const [syncConfig, setSyncConfig] = useState({ concurrency: 3, mode: 'incremental' });
+  const [syncConfig, setSyncConfig] = useState<{ concurrency: number; mode: string; granularities: string[]; days: number }>({
+    concurrency: 3,
+    mode: 'incremental',
+    granularities: ['day', 'week', 'month', 'm30', 'm60'],
+    days: 800,
+  });
   const [overviewData, setOverviewData] = useState<any>(null);
+
+  // 可同步粒度：日线/周线/月线（fqkline，3年+）+ 5/30/60分钟（mkline，仅近期）
+  const GRAN_OPTIONS: { key: string; label: string; desc: string }[] = [
+    { key: 'day', label: '日线', desc: '3年+' },
+    { key: 'week', label: '周线', desc: '大周期' },
+    { key: 'month', label: '月线', desc: '看周期' },
+    { key: 'm5', label: '5分钟', desc: '近1-2月' },
+    { key: 'm15', label: '15分钟', desc: '近1-2月' },
+    { key: 'm30', label: '30分钟', desc: '近1年' },
+    { key: 'm60', label: '60分钟', desc: '近1年' },
+  ];
+  const toggleGran = (k: string) => setSyncConfig(s => {
+    const has = s.granularities.includes(k);
+    return { ...s, granularities: has ? s.granularities.filter(g => g !== k) : [...s.granularities, k] };
+  });
 
   const [syncState, setSyncState] = useState<SyncState>({
     status: "idle", progress: 0, current: 0, total: 0, logs: [], totalRequests: 0, errorCount: 0, diskUsageBytes: 0
@@ -88,14 +108,6 @@ export default function Dashboard() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
-  const handleCleanCache = async () => {
-    if (!confirm("确定要清理所有本地 CSV 缓存吗？这将强制下次同步为全量获取。")) return;
-    try {
-      await fetch("/api/sync/clean-cache", { method: "POST" });
-      fetchOverview();
-    } catch(e) {}
-  };
-
   // 导出当前股票池实时行情为 CSV（复用前端 exportUtils，无需服务端打包）
   const handleExport = async () => {
     try {
@@ -143,8 +155,38 @@ export default function Dashboard() {
                 <h3 className="text-[14px] font-medium text-white mb-4">同步配置</h3>
                 <div className="space-y-4">
                   <div>
+                    <label className="text-[12px] text-muted mb-1 block">同步粒度（可多选）</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {GRAN_OPTIONS.map(opt => {
+                        const active = syncConfig.granularities.includes(opt.key);
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => toggleGran(opt.key)}
+                            className={`px-2 py-1.5 rounded text-[12px] border transition-colors text-left ${active ? 'bg-primary/15 border-primary text-white' : 'bg-surface-elevated-dark border-hairline-dark text-muted hover:text-body-dark'}`}
+                          >
+                            <div className="font-medium">{opt.label}</div>
+                            <div className="text-[10px] opacity-70">{opt.desc}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-muted mt-1.5">日/周/月线走 fqkline（可取 3 年+）；分钟线走 mkline，腾讯仅保留近期数据。</p>
+                  </div>
+                  <div>
+                    <label className="text-[12px] text-muted mb-1 block">日线历史深度（天，全量模式生效）</label>
+                    <input
+                      type="number" min="30" max="800"
+                      value={syncConfig.days}
+                      onChange={e => setSyncConfig({ ...syncConfig, days: parseInt(e.target.value) || 800 })}
+                      className="w-full bg-surface-elevated-dark border border-hairline-dark rounded px-3 py-1.5 text-[13px] text-white focus:border-primary transition-colors outline-none"
+                    />
+                    <p className="text-[10px] text-muted mt-1">800 ≈ 3 年交易日，足够稳定计算 MA250。增量模式自动取 max(30, 300) 保证指标预热。</p>
+                  </div>
+                  <div>
                     <label className="text-[12px] text-muted mb-1 block">并发请求数</label>
-                    <input 
+                    <input
                       type="number" min="1" max="10"
                       value={syncConfig.concurrency}
                       onChange={e => setSyncConfig({...syncConfig, concurrency: parseInt(e.target.value) || 1})}
@@ -170,9 +212,9 @@ export default function Dashboard() {
                 <p className="text-[13px] text-body-dark mb-4 flex-1">基于当前股票池与配置参数，从腾讯证券行情接口获取历史K线数据并计算 MACD/RSI/KDJ/估值指标。</p>
                 <div className="mt-auto">
                    {syncState.status === "idle" && (
-                      <Button onClick={startHistoricalSync} className="w-full h-10">
+                      <Button onClick={startHistoricalSync} className="w-full h-10" disabled={syncConfig.granularities.length === 0}>
                         <Play className="w-4 h-4 mr-2" />
-                        开始同步任务
+                        {syncConfig.granularities.length === 0 ? '请至少选择一个粒度' : '开始同步任务'}
                       </Button>
                    )}
                    {syncState.status === "syncing" && (
@@ -291,7 +333,7 @@ export default function Dashboard() {
         )}
 
         {activeTab === 2 && (
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <Card variant="card-dark" className="flex flex-col items-center justify-center py-8">
               <Database className="w-8 h-8 text-primary mb-3" />
               <div className="text-[28px] font-mono font-medium text-white">{overviewData?.stocks || 0}</div>
@@ -303,11 +345,6 @@ export default function Dashboard() {
               <div className="text-[13px] text-muted mt-1">估值快照数据</div>
             </Card>
             <Card variant="card-dark" className="flex flex-col items-center justify-center py-8">
-              <HardDrive className="w-8 h-8 text-body-dark mb-3" />
-              <div className="text-[28px] font-mono font-medium text-white">{overviewData?.csvCount || 0}</div>
-              <div className="text-[13px] text-muted mt-1">本地 CSV 缓存文件</div>
-            </Card>
-            <Card variant="card-dark" className="flex flex-col items-center justify-center py-8">
               <Settings2 className="w-8 h-8 text-muted mb-3" />
               <div className="text-[28px] font-mono font-medium text-white">{overviewData?.settings || 0}</div>
               <div className="text-[13px] text-muted mt-1">系统配置项</div>
@@ -316,20 +353,7 @@ export default function Dashboard() {
         )}
 
         {activeTab === 3 && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-             <Card variant="card-dark" className="flex flex-col">
-                <h3 className="text-[14px] font-medium text-white mb-2 flex items-center">
-                  <Trash2 className="w-4 h-4 mr-2 text-trading-down" /> 缓存清理
-                </h3>
-                <p className="text-[13px] text-body-dark mb-6">
-                  清理 data/ 目录下的所有 CSV 行情缓存文件。清理后下次执行同步任务将重新从腾讯接口全量下载历史行情。
-                </p>
-                <div className="mt-auto">
-                  <Button variant="outline" className="w-full border-trading-down text-trading-down hover:bg-trading-down/10" onClick={handleCleanCache}>
-                    清理所有 CSV 缓存
-                  </Button>
-                </div>
-             </Card>
+          <div className="grid grid-cols-1 max-w-2xl gap-4">
              <Card variant="card-dark" className="flex flex-col">
                 <h3 className="text-[14px] font-medium text-white mb-2 flex items-center">
                   <Download className="w-4 h-4 mr-2 text-primary" /> 数据导出

@@ -6,15 +6,115 @@
 // 第三层 小周期(时机)抓节奏 —— 确认入场：MACD金叉、KDJ金叉、放量、RSI健康
 
 import type { KlineRow } from './signalEngine.js';
+import { calculateIndicators } from './indicators.js';
+import { sma, safe } from './indicatorUtil.js';
 
-const safe = (v: number | null | undefined): number | null =>
-  (typeof v === 'number' && isFinite(v)) ? v : null;
+// 分钟线一根（与 kline_min 表结构对齐，仅取 OHLCV + time）
+export interface MinBar {
+  time: string;
+  open: number;
+  close: number;
+  high: number;
+  low: number;
+  volume: number;
+}
 
-function sma(values: number[], period: number): number | null {
-  if (values.length < period) return null;
-  let s = 0;
-  for (let i = values.length - period; i < values.length; i++) s += values[i];
-  return s / period;
+// ─────────────────────────────────────────────
+// 月线趋势判定 —— 对应《选股交易操作手册》第二步 2.1 第一层「大周期定方向」硬过滤
+// 原书：月线均线多头排列，或月线 MACD 金叉；不满足（月线空头）直接淘汰。
+// 输入为月线 K 线（kline_long_period period=month，已含指标），读取最后 1~2 根判定。
+// ─────────────────────────────────────────────
+export interface MonthlyTrend {
+  score: number;       // 0~30
+  bullish: boolean;    // 月线多头排列 / MACD 金叉
+  bearish: boolean;    // 月线空头排列 / 跌破 MA20 —— 触发硬过滤
+  label: string;
+}
+
+export function assessMonthlyTrend(monthRows: KlineRow[]): MonthlyTrend {
+  if (!monthRows || monthRows.length < 3) {
+    return { score: 0, bullish: false, bearish: false, label: '月线数据不足' };
+  }
+  const last = monthRows[monthRows.length - 1];
+  const prev = monthRows[monthRows.length - 2];
+  const price = last.close;
+  const ma5 = safe(last.ma5), ma10 = safe(last.ma10), ma20 = safe(last.ma20);
+  const macd = safe(last.macd), sig = safe(last.macdSignal);
+  const pMacd = safe(prev?.macd), pSig = safe(prev?.macdSignal);
+
+  const bullAlign = ma5 !== null && ma10 !== null && ma20 !== null && ma5 > ma10 && ma10 > ma20;
+  const bearAlign = ma5 !== null && ma10 !== null && ma20 !== null && ma5 < ma10 && ma10 < ma20;
+  const goldenCross = pMacd !== null && pSig !== null && macd !== null && sig !== null && pMacd <= pSig && macd > sig;
+  const aboveMa20 = ma20 !== null && price > ma20;
+
+  if (bullAlign && aboveMa20) return { score: 30, bullish: true, bearish: false, label: '月线多头排列' };
+  if (goldenCross || (aboveMa20 && macd !== null && macd > 0)) {
+    return { score: 22, bullish: true, bearish: false, label: goldenCross ? '月线MACD金叉' : '月线偏强' };
+  }
+  if (bearAlign || (ma20 !== null && price < ma20)) {
+    return { score: 0, bullish: false, bearish: true, label: bearAlign ? '月线空头排列' : '月线跌破MA20' };
+  }
+  if (aboveMa20) return { score: 14, bullish: false, bearish: false, label: '月线站上MA20' };
+  return { score: 8, bullish: false, bearish: false, label: '月线中性' };
+}
+
+// ─────────────────────────────────────────────
+// 小周期（60 分钟）时机确认 —— 对应《选股交易操作手册》第二步 2.3 第三层
+// 「小周期抓节奏」：放量突破 / MACD 金叉 / KDJ 超跌金叉任一出现即确认入场
+// 这是三周期共振真正的第三层（此前由日线时机信号近似替代）
+// ─────────────────────────────────────────────
+export interface IntradayAssessment {
+  confirmed: boolean;        // 60 分钟是否出现买入确认信号
+  score: number;             // 0-8，并入时机分
+  signals: { type: 'bullish' | 'bearish'; name: string; confidence: number }[];
+  sampleBars: number;
+}
+
+export function assessIntraday60(bars: MinBar[]): IntradayAssessment {
+  const signals: IntradayAssessment['signals'] = [];
+  if (bars.length < 35) {
+    return { confirmed: false, score: 0, signals, sampleBars: bars.length };
+  }
+  const close = bars.map(b => b.close);
+  const high = bars.map(b => b.high);
+  const low = bars.map(b => b.low);
+  const vol = bars.map(b => b.volume);
+  const ind = calculateIndicators(close, high, low, vol);
+  const n = close.length - 1;
+  const p = n - 1;
+
+  const macd = safe(ind.pMacd[n]?.MACD);
+  const sig = safe(ind.pMacd[n]?.signal);
+  const pMacd = safe(ind.pMacd[p]?.MACD);
+  const pSig = safe(ind.pMacd[p]?.signal);
+  const ma20 = safe(ind.pMa.ma20[n]);
+  const k = safe(ind.pKdj[n]?.k);
+  const d = safe(ind.pKdj[n]?.d);
+  const pk = safe(ind.pKdj[p]?.k);
+  const pd = safe(ind.pKdj[p]?.d);
+  const price = close[n];
+  const avgVol5 = vol.slice(-5).reduce((a, b) => a + b, 0) / 5;
+
+  let score = 0;
+  let confirmed = false;
+
+  // 60 分 MACD 金叉
+  if (pMacd !== null && pSig !== null && macd !== null && sig !== null && pMacd <= pSig && macd > sig) {
+    score += 6; confirmed = true;
+    signals.push({ type: 'bullish', name: '60分MACD金叉', confidence: 0.8 });
+  }
+  // 60 分放量突破 MA20（站上 MA20 且量比≥1.2）
+  if (ma20 !== null && price > ma20 && avgVol5 > 0 && vol[n] > avgVol5 * 1.2 && (pMacd === null || close[p] <= (ma20 + 0.001))) {
+    score += 4; confirmed = true;
+    signals.push({ type: 'bullish', name: '60分放量突破', confidence: 0.72 });
+  }
+  // 60 分 KDJ 低位金叉（K<50）
+  if (k !== null && d !== null && pk !== null && pd !== null && pk <= pd && k > d && k < 50) {
+    score += 4; confirmed = true;
+    signals.push({ type: 'bullish', name: '60分KDJ低位金叉', confidence: 0.7 });
+  }
+
+  return { confirmed, score: Math.min(8, score), signals, sampleBars: bars.length };
 }
 
 // ISO 周键（年-周），用于把日线聚合成自然周（周一为周首）
@@ -141,23 +241,30 @@ export interface MultiCycleBreakdown {
 export interface MultiCycleResult {
   score: number;
   breakdown: MultiCycleBreakdown;
-  resonant: boolean;      // 是否三周期共振（大周期向上 + 中周期结构成立 + 时机确认）
+  resonant: boolean;      // 是否三周期共振（大周期向上 + 中周期结构成立 + 时机确认 + 60分确认 + 月线非空）
   signals: { type: 'bullish' | 'bearish'; name: string; confidence: number }[];
   weekly: WeeklyTrend;
+  monthly: MonthlyTrend | null;   // 月线趋势（第一层硬过滤）；无数据为 null
   atr14: number | null;
   stopLossPrice: number | null;  // 基于 ATR 的建议止损位
+  intraday60: IntradayAssessment | null;  // 60分钟确认（无数据时为 null，退化为两周期）
 }
 
 /**
  * 三周期共振评分。resonant=true 表示大周期向上 + 日线结构成立 + 时机确认同时满足（手册"黄金点"）。
+ * intraday60（60分钟）：要求第三层「小周期抓节奏」确认。
+ * monthly（月线）：第一层硬过滤——月线空头则大周期近淘汰、resonant=false。
  */
-export function scoreMultiCycle(rows: KlineRow[]): MultiCycleResult {
+export function scoreMultiCycle(rows: KlineRow[], opts?: { intraday60?: MinBar[]; monthly?: KlineRow[] }): MultiCycleResult {
   const signals: MultiCycleResult['signals'] = [];
 
   if (rows.length < 30) {
     return {
       score: 0, breakdown: { weeklyTrend: 0, structure: 0, volumePrice: 0, timing: 0 },
-      resonant: false, signals, weekly: assessWeeklyTrend(rows), atr14: null, stopLossPrice: null,
+      resonant: false, signals, weekly: assessWeeklyTrend(rows),
+      monthly: opts?.monthly ? assessMonthlyTrend(opts.monthly) : null,
+      atr14: null, stopLossPrice: null,
+      intraday60: opts?.intraday60 ? assessIntraday60(opts.intraday60) : null,
     };
   }
 
@@ -187,10 +294,21 @@ export function scoreMultiCycle(rows: KlineRow[]): MultiCycleResult {
   const volRatio = safe(last.volRatio);
   const atr14 = safe(last.atr14);
 
-  // ── 1. 大周期（周线趋势，满分 30）──
+  // ── 1. 大周期（周线趋势 + 月线硬过滤，满分 30）── 手册 2.1 第一层
   const weekly = assessWeeklyTrend(rows);
-  const weeklyTrend = weekly.score;
+  const monthly = opts?.monthly ? assessMonthlyTrend(opts.monthly) : null;
+  let weeklyTrend = weekly.score;
   if (weekly.bullish) signals.push({ type: 'bullish', name: '周线多头', confidence: 0.85 });
+  // 月线第一层硬过滤：月线空头 → 大周期分近淘汰；月线多头 → 加成
+  if (monthly) {
+    if (monthly.bearish) {
+      weeklyTrend = Math.min(weeklyTrend, 8);
+      signals.push({ type: 'bearish', name: monthly.label, confidence: 0.85 });
+    } else if (monthly.bullish) {
+      weeklyTrend = Math.min(30, weeklyTrend + 5);
+      signals.push({ type: 'bullish', name: monthly.label, confidence: 0.85 });
+    }
+  }
 
   // ── 2. 中周期（日线结构，满分 30）──
   let structure = 0;
@@ -263,19 +381,29 @@ export function scoreMultiCycle(rows: KlineRow[]): MultiCycleResult {
   }
   timing = Math.min(timing, 20);
 
+  // ── 5. 小周期（60 分钟）时机确认（若提供 intraday60）── 第三层「小周期抓节奏」
+  const intraday60 = opts?.intraday60 ? assessIntraday60(opts.intraday60) : null;
+  if (intraday60) {
+    timing = Math.min(20, timing + intraday60.score);
+    signals.push(...intraday60.signals);
+  }
+
   const score = Math.round(weeklyTrend + structure + volumePrice + timing);
 
   // 三周期共振：大周期向上 + 日线结构成立（多头排列或站上MA20）+ 时机确认（有买入信号）
+  // 若提供了 60 分钟数据，还要求第三层确认；月线空头（第一层硬过滤）则否决共振
   const structureValid = structure >= 14; // 至少多头排列+站上MA20
   const timingValid = timing >= 5;        // 至少一个时机信号
-  const resonant = weekly.bullish && structureValid && timingValid;
+  const resonant = weekly.bullish && structureValid && timingValid
+    && (intraday60 === null || intraday60.confirmed)
+    && (monthly === null || !monthly.bearish);
 
   // 基于 ATR 的建议止损位（手册：1.5~2 倍 ATR，取 2 倍）
   const stopLossPrice = atr14 !== null ? price - 2 * atr14 : (ma20 !== null ? ma20 * 0.97 : null);
 
   return {
-    score, resonant, signals, weekly, atr14,
+    score, resonant, signals, weekly, monthly, atr14,
     breakdown: { weeklyTrend, structure, volumePrice, timing },
-    stopLossPrice,
+    stopLossPrice, intraday60,
   };
 }

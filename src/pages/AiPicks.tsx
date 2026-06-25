@@ -20,7 +20,7 @@ interface AIPick {
 }
 
 // 策略缓存 + 模块级请求序列号，用于丢弃过期响应，消除竞态
-type CacheEntry = { picks: AIPick[]; generatedAt: string };
+type CacheEntry = { picks: AIPick[]; generatedAt: string; timing?: any };
 const frontendCache: Record<string, CacheEntry> = {};
 let requestSeq = 0;
 
@@ -33,6 +33,7 @@ export default function AiPicks() {
   const [generatedAt, setGeneratedAt] = useState("");
   const [needsGeneration, setNeedsGeneration] = useState(false);
   const [addedCodes, setAddedCodes] = useState<Set<string>>(new Set());
+  const [timing, setTiming] = useState<any>(null);   // 大盘择时上下文（regime/仓位上限）
 
   const addToPool = async (code: string, name: string) => {
     if (addedCodes.has(code)) return;
@@ -72,12 +73,15 @@ export default function AiPicks() {
           const list = json.picks || [];
           // AI 评分统一按分数降序排列，保证排名稳定
           list.sort((a: AIPick, b: AIPick) => b.score - a.score);
+          const t = json.timing || null;
           setPicks(list);
+          setTiming(t);
           setGeneratedAt(json.generatedAt || new Date().toISOString());
           setNeedsGeneration(false);
           frontendCache[strategy] = {
             picks: list,
-            generatedAt: json.generatedAt || new Date().toISOString()
+            generatedAt: json.generatedAt || new Date().toISOString(),
+            timing: t,
           };
         }
       }
@@ -94,6 +98,7 @@ export default function AiPicks() {
     const cached = frontendCache[activeStrategy];
     if (cached) {
       setPicks(cached.picks);
+      setTiming(cached.timing);
       setGeneratedAt(cached.generatedAt);
       setNeedsGeneration(false);
       setLoading(false);
@@ -119,6 +124,21 @@ export default function AiPicks() {
           </div>
         )}
       </header>
+
+      {/* 大盘择时上下文：选股结果须与大盘环境挂钩（手册 STEP1） */}
+      {timing && (
+        <div className="mb-6 shrink-0 flex items-center gap-4 p-3 rounded-lg bg-surface-card-dark border border-hairline-dark">
+          <div className={`px-2.5 py-1 rounded text-[12px] font-medium ${timing.regime === 'bull' ? 'bg-trading-up/15 text-trading-up' : timing.regime === 'bear' ? 'bg-trading-down/15 text-trading-down' : 'bg-yellow-400/15 text-yellow-400'}`}>
+            {timing.regimeLabel}
+          </div>
+          <div className="text-[12px] text-muted">
+            建议总仓位上限 <span className="text-white font-mono font-semibold">{Math.round(timing.maxPosition * 100)}%</span>
+          </div>
+          <div className="text-[12px] text-body-dark flex-1 min-w-0 truncate">
+            当前选股在大盘 <span className="text-white">{timing.regime === 'bull' ? '多头' : timing.regime === 'bear' ? '空头' : '震荡'}</span> 环境下生成，{timing.regime === 'bear' ? '宜轻仓/防御' : timing.regime === 'bull' ? '可积极配置' : '半仓滚动'}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 shrink-0">
         {strategies.map(s => {

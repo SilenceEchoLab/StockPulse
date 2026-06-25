@@ -68,7 +68,7 @@ export const klineDaily = sqliteTable('kline_daily', {
 
 export const klineMin = sqliteTable('kline_min', {
   marketCode: text('market_code').notNull(),
-  period: text('period').notNull(), // m30, m60
+  period: text('period').notNull(), // m5, m15, m30, m60
   time: text('time').notNull(), // YYYYMMDDHHmm
   open: real('open').notNull(),
   close: real('close').notNull(),
@@ -77,6 +77,44 @@ export const klineMin = sqliteTable('kline_min', {
   volume: real('volume').notNull(),
 }, (table) => ({
   pk: primaryKey({ columns: [table.marketCode, table.period, table.time] })
+}));
+
+// 长周期 K 线（周线 week / 月线 month）—— 对应《选股交易操作手册》三周期共振的「大周期定方向」层
+// 月线看周期、周线看趋势；存储原生周/月 OHLCV + 全套技术指标，避免每次由日线聚合（含除权一致性）
+// 与 kline_daily 共用指标列定义，便于 cycles.ts 直接消费做月/周趋势判定
+export const klineLongPeriod = sqliteTable('kline_long_period', {
+  marketCode: text('market_code').notNull(),
+  period: text('period').notNull(), // week | month
+  date: text('date').notNull(), // 周/月最后交易日 YYYY-MM-DD
+  open: real('open').notNull(),
+  close: real('close').notNull(),
+  high: real('high').notNull(),
+  low: real('low').notNull(),
+  volume: real('volume').notNull(),
+  // 技术指标（与 kline_daily 对齐）
+  macd: real('macd'),
+  macdSignal: real('macd_signal'),
+  macdHist: real('macd_hist'),
+  rsi14: real('rsi14'),
+  kdjK: real('kdj_k'),
+  kdjD: real('kdj_d'),
+  kdjJ: real('kdj_j'),
+  ma5: real('ma5'),
+  ma10: real('ma10'),
+  ma20: real('ma20'),
+  ma60: real('ma60'),
+  ma120: real('ma120'),
+  ma250: real('ma250'),
+  bias6: real('bias6'),
+  bias12: real('bias12'),
+  bias24: real('bias24'),
+  atr14: real('atr14'),
+  obv: real('obv'),
+  volMa5: real('vol_ma5'),
+  volRatio: real('vol_ratio'),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.marketCode, table.period, table.date] }),
+  marketIdx: index('kline_long_period_market_idx').on(table.marketCode),
 }));
 
 export const groups = sqliteTable('groups', {
@@ -182,6 +220,7 @@ export const recommendations = sqliteTable('recommendations', {
   entryPrice: real('entry_price'),
   stopLoss: real('stop_loss'),
   takeProfit: real('take_profit'),
+  positionSize: real('position_size'), // 建议持仓股数（头寸反推：单笔风险≤1% ÷ (entry−stop)，受大盘仓位上限约束）
   // 参与投票的策略及各自置信度（JSON），用于把真实收益归因到具体策略 —— Karpathy learn 环节
   strategyDetail: text('strategy_detail'),
   reason: text('reason'),

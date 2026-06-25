@@ -14,7 +14,7 @@
 import type { KlineRow } from './signalEngine.js';
 import type { BacktestParams, StrategyType } from './backtestEngine.js';
 import { generateSignal } from './backtestEngine.js';
-import { scoreMultiCycle } from './cycles.js';
+import { scoreMultiCycle, type MinBar } from './cycles.js';
 import { scoreStock, detectSignals } from './signalEngine.js';
 
 const safe = (v: number | null | undefined): number | null =>
@@ -29,8 +29,19 @@ export interface StockRecommendation {
   entryPrice: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
+  riskReward: number | null;     // 盈亏比 = (tp−entry)/(entry−sl)，手册要求 ≥2:1
+  positionSize: number | null;   // 建议持仓股数（头寸反推，受大盘仓位上限与单股≤20%约束）
+  positionValuePct: number | null; // 建议仓位占账户净值比例
   reason: string;
   signals: { type: 'bullish' | 'bearish'; name: string; confidence: number }[];
+}
+
+// 仓位/风控选项：接通择时→仓位链（手册 1.3 + 5.3）
+export interface RecommendationRiskOptions {
+  maxPosition?: number;       // 大盘择时给出的总仓位上限（0~1），来自 marketTiming
+  accountEquity?: number;     // 账户净值（元），默认 10 万
+  riskPerTrade?: number;      // 单笔风险占比（默认 0.01 = 1%），手册 5.3
+  minRiskReward?: number;     // 最低盈亏比门槛（默认 1.5，<此值不发买）
 }
 
 /**
@@ -45,6 +56,9 @@ export function generateRecommendation(
   optima: { strategy: StrategyType; params: BacktestParams; compositeScore: number }[],
   marketRegime: 'bull' | 'range' | 'bear',
   credibility?: Partial<Record<StrategyType, number>>,
+  riskOpts?: RecommendationRiskOptions,
+  intraday60?: MinBar[],   // 60分钟K线（来自 kline_min），用于三周期共振第三层确认；缺省退化为两周期
+  monthlyRows?: KlineRow[], // 月线K线（来自 kline_long_period month），第一层硬过滤；缺省不启用
 ): StockRecommendation {
   const code = (rows[0] as any)?.marketCode ?? '';
   const last = rows[rows.length - 1];
@@ -68,8 +82,11 @@ export function generateRecommendation(
   const totalStrategies = votes.length || 1;
   const consensusStrength = Math.max(buyCount, sellCount) / totalStrategies;
 
-  // 三周期共振打分补充
-  const cycleResult = scoreMultiCycle(rows);
+  // 三周期共振打分补充（含月线第一层硬过滤 + 60 分钟第三层，若提供）
+  const cycleResult = scoreMultiCycle(rows, {
+    ...(intraday60 ? { intraday60 } : {}),
+    ...(monthlyRows ? { monthly: monthlyRows } : {}),
+  });
   const signalReport = detectSignals(rows);
 
   // 综合判定 - 圆桌会议优化：加权连续打分制 (Continuous Net Scoring)
@@ -129,14 +146,54 @@ export function generateRecommendation(
     takeProfit = entryPrice * (1 + takeProfitPct);
   }
 
+  // ── 盈亏比（手册铁律3：EV>0 才执行；盈亏比≥2:1）──
+  const riskReward = (entryPrice !== null && stopLoss !== null && takeProfit !== null && entryPrice > stopLoss)
+    ? (takeProfit - entryPrice) / (entryPrice - stopLoss)
+    : null;
+
+  // ── 头寸反推 + 仓位上限（手册 5.3：头寸=允许亏损金额÷(入场−止损)；单股≤20%；大盘决定总仓位）──
+  const equity = riskOpts?.accountEquity ?? 100000;
+  const riskPct = riskOpts?.riskPerTrade ?? 0.01;
+  const maxPos = riskOpts?.maxPosition ?? 0.5;
+  let positionSize: number | null = null;
+  let positionValuePct: number | null = null;
+  if (entryPrice !== null && stopLoss !== null && entryPrice > stopLoss) {
+    const riskAmount = equity * riskPct;                 // 单笔可承受亏损金额
+    const perShareRisk = entryPrice - stopLoss;
+    let shares = Math.floor(riskAmount / perShareRisk / 100) * 100; // 按 1 手=100 股取整
+    // 单股上限：账户 × min(20%, 大盘总仓位上限)。手册两条独立约束：单股≤20% + 总仓位≤maxPosition
+    // （总仓位的组合层约束由 recommendationBacktest 的权重分配保证，单股推荐这里取两者较紧者）
+    const maxStockValue = equity * Math.min(0.20, maxPos);
+    const maxShares = Math.floor(maxStockValue / entryPrice / 100) * 100;
+    if (shares > maxShares) shares = maxShares;
+    if (shares >= 100) {
+      positionSize = shares;
+      positionValuePct = Math.round((shares * entryPrice) / equity * 10000) / 10000;
+    }
+  }
+
+  // ── 盈亏比门槛：负期望/低盈亏比交易坚决不做（手册：盈亏比<1 坚决不做；<2 降级）──
+  const minRR = riskOpts?.minRiskReward ?? 1.5;
+  if (action === 'buy') {
+    if (riskReward !== null && riskReward < minRR) {
+      action = 'hold';        // 盈亏比不足，放弃本次买入
+      confidence = 0;
+    } else if (riskReward !== null && riskReward < 2) {
+      confidence = Math.round(confidence * 0.7 * 100) / 100; // 未达 2:1，降级置信度
+    }
+  }
+
   // 推荐理由
   const reasons: string[] = [];
   if (buyCount > 0) reasons.push(`${buyCount}策略看多`);
   if (sellCount > 0) reasons.push(`${sellCount}策略看空`);
   if (cycleResult.resonant) reasons.push('三周期共振');
   if (signalReport.buySignals.length >= 3) reasons.push(`${signalReport.buySignals.length}重买入信号`);
+  if (riskReward !== null) reasons.push(`盈亏比${riskReward.toFixed(2)}:1`);
+  if (positionSize !== null && action === 'buy') reasons.push(`建议${positionSize}股(≈${(positionValuePct! * 100).toFixed(1)}%仓位)`);
   const riskTags = signalReport.riskTags.filter(r => r.level === 'danger');
   if (riskTags.length > 0) reasons.push(riskTags[0].name);
+  if (action === 'hold' && riskReward !== null && riskReward < minRR) reasons.push(`盈亏比${riskReward.toFixed(2)}<${minRR}放弃`);
 
   return {
     marketCode: code,
@@ -147,6 +204,9 @@ export function generateRecommendation(
     entryPrice,
     stopLoss,
     takeProfit,
+    riskReward: riskReward !== null ? Math.round(riskReward * 100) / 100 : null,
+    positionSize,
+    positionValuePct,
     reason: reasons.join(' / ') || '信号不足',
     signals: [...cycleResult.signals, ...signalReport.buySignals.map(s => ({ type: 'bullish' as const, name: s.name, confidence: s.confidence }))].slice(0, 5),
   };

@@ -11,6 +11,7 @@
 //   牛市主升(≥3 多) → 70-80%   震荡市(2 多或分歧) → 50%   弱势(≥3 空) → 0-30%
 
 import type { KlineRow } from './signalEngine.js';
+import { sma, safe } from './indicatorUtil.js';
 
 export type Regime = 'bull' | 'range' | 'bear';
 
@@ -36,16 +37,6 @@ export interface MarketTiming {
     ma60: number | null; ma250: number | null;
   };
   suggestion: string;      // 操作建议
-}
-
-const safe = (v: number | null | undefined): number | null =>
-  (typeof v === 'number' && isFinite(v)) ? v : null;
-
-function sma(values: number[], period: number): number | null {
-  if (values.length < period) return null;
-  let s = 0;
-  for (let i = values.length - period; i < values.length; i++) s += values[i];
-  return s / period;
 }
 
 /**
