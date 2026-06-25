@@ -143,7 +143,7 @@ export default function AutoResearch() {
   const loadKlineForRec = async (marketCode: string) => {
     if (klineDataMap[marketCode]) return;
     try {
-      const res = await fetch(`/api/kline/${marketCode}?period=daily&limit=100`);
+      const res = await fetch(`/api/kline/${marketCode}?period=day&limit=100`);
       const json = await res.json();
       if (json.success && json.data) {
         setKlineDataMap(prev => ({ ...prev, [marketCode]: json.data }));

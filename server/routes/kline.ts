@@ -56,7 +56,12 @@ app.get('/:code', async (c) => {
       }
       
       const resJson: any = await fetchWithRetry(url);
-      if (resJson.code !== 0) throw new Error(resJson.msg || "Unknown API error");
+      if (resJson.code !== 0) {
+        // Upstream (Tencent) rejected the request — e.g. bad code/period ("bad params").
+        // Surface as 502 instead of throwing into the 500 catch path.
+        console.warn(`[kline] upstream rejected code=${code} period=${period}: ${resJson.msg}`);
+        return c.json({ success: false, error: resJson.msg || 'Upstream API error' }, 502);
+      }
       
       const dataObj = resJson.data[code];
       const actualPeriod = period === 'time' ? 'm1' : period;
