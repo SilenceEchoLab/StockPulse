@@ -32,6 +32,9 @@ export interface BacktestParams {
   rsiBuy?: number;            // RSI 买入阈值（默认 30）
   rsiSell?: number;           // RSI 卖出阈值（默认 70）
   marketRegime?: 'bull' | 'range' | 'bear'; // 大盘择时：bear市禁买
+  // 分批/金字塔建仓（手册 4.3）：首仓试错 + 盈利后加仓 + 亏损绝不补。默认关，开启时分批入场
+  stagedEntry?: boolean;
+  trialFraction?: number;     // 首仓占 positionPct 的比例（默认 0.4，即 ~12% 若 positionPct=0.30）
 }
 
 export interface BacktestConfig {
@@ -266,7 +269,10 @@ export function generateSignal(
   return 'hold';
 }
 
-const WARMUP = 70; // 指标预热：周线 MA60 需约 60 周 ≈ 300 天，但用日线 MA 兜底；70 天可覆盖日线指标稳定
+// 指标预热：须覆盖 MA250（年线，250 日）才能让「站上年线 +15」等长期趋势分稳定，
+// 否则回测前 ~180 天 MA250/MA120 为 null，大周期层持续失真。
+// 周线 MA60（年线级别）需约 60 周 ≈ 300 天，略晚于 WARMUP 激活——多头排列（周 MA5/10/20，≈100 天）已先行有效。
+const WARMUP = 260;
 
 /** 对单只股票运行回测（纯函数） */
 export function runBacktest(
@@ -297,6 +303,7 @@ export function runBacktest(
   let entryATR = 0;
   let highestSinceEntry = 0;
   let buyCost = 0;            // 当前持仓的买入总成本（含费），用于卖出时算盈亏
+  let stagedFilled = false;   // 分批建仓：是否已完成金字塔加仓（每次开仓重置）
 
   const trades: Trade[] = [];
   const equityCurve: { date: string; equity: number }[] = [];
@@ -318,6 +325,28 @@ export function runBacktest(
 
     // ── 持仓中：先检查离场（用 execDay 的 high/low/open）──
     if (position > 0) {
+      // 分批/金字塔加仓（手册 4.3）：盈利后才加，亏损绝不补，仅加一次
+      if (params.stagedEntry && !stagedFilled && cash > 0) {
+        const trialFrac = params.trialFraction ?? 0.4;
+        const profitEmerging = entryPrice > 0 && execDay.close >= entryPrice * 1.03;
+        const withinWindow = (i - entryIdx) <= Math.floor(maxHold / 2);
+        if (profitEmerging && withinWindow) {
+          const addBudget = cash * positionPct * (1 - trialFrac);
+          const addPrice = execDay.close * (1 + slippage);
+          const addShares = Math.floor(addBudget / (addPrice * (1 + fees.buy)) / 100) * 100;
+          if (addShares >= 100) {
+            const addCost = addShares * addPrice * (1 + fees.buy);
+            if (addCost <= cash) {
+              cash -= addCost;
+              const totalShares = position + addShares;
+              entryPrice = (buyCost + addCost) / totalShares; // 加权成本基准
+              buyCost += addCost;
+              position = totalShares;
+            }
+          }
+          stagedFilled = true; // 仅加一次，避免无限补仓
+        }
+      }
       highestSinceEntry = Math.max(highestSinceEntry, execDay.high);
       const holdDays = i - entryIdx;
 
@@ -397,7 +426,8 @@ export function runBacktest(
 
         if (!lockedUp && !tooHigh) {
           const buyPrice = execDay.open * (1 + slippage);
-          const budget = cash * positionPct;
+          const frac = params.stagedEntry ? (params.trialFraction ?? 0.4) : 1; // 分批建仓：首仓试错
+          const budget = cash * positionPct * frac;
           const maxAffordable = Math.floor(budget / (buyPrice * (1 + fees.buy)));
           if (maxAffordable >= 100) { // 至少 1 手
             const shares = Math.floor(maxAffordable / 100) * 100;
@@ -411,6 +441,7 @@ export function runBacktest(
               entryATR = safe(execDay.atr14) ?? (buyPrice * 0.03); // ATR 兜底
               highestSinceEntry = execDay.high;
               buyCost = cost;
+              stagedFilled = !params.stagedEntry; // 分批模式首仓后允许加仓；普通模式视为已满
             }
           }
         }

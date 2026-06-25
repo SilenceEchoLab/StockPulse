@@ -12,7 +12,7 @@
 import { runBacktest, type StrategyType, type BacktestParams, type BacktestMetrics, type BacktestConfig } from './backtestEngine.js';
 import type { KlineRow } from './signalEngine.js';
 
-const WARMUP = 70;
+const WARMUP = 260; // 与 backtestEngine 一致：覆盖 MA250(250日)，避免大周期层失真
 // 测试段最低交易笔数：低于此数统计意义不足，评分打折；不达标的方案不进入全局稳健聚合
 const MIN_TEST_TRADES = 2;
 

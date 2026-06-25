@@ -27,16 +27,20 @@ export interface EngineTrade {
   holdDays: number;
   buyVotes: string[];
   regime: string;
+  weight: number;         // 组合权重（受单股≤maxStockWeight 与总仓位≤maxPosition 约束）
 }
 
 export interface EngineBacktestResult {
   totalTrades: number;
   winRate: number;
   avgReturn: number;
-  totalReturn: number;     // 等权月度组合复利收益
+  totalReturn: number;     // 加权月度组合复利收益
   sharpe: number;          // 月度年化夏普
   maxDrawdown: number;     // 月度最大回撤
   avgHoldDays: number;
+  avgPositionUsed: number; // 平均实际占用仓位（权重和的均值）
+  accountHalted: boolean;  // 是否曾触发账户级回撤熔断
+  haltDays: number;        // 熔断冷却占用交易日数（停手复盘期）
   byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>;
   byRegime: Record<string, { trades: number; winRate: number; avgReturn: number }>;
   byMonth: { month: string; trades: number; avgReturn: number }[];
@@ -49,10 +53,64 @@ interface Options {
   maxHoldDays?: number;   // 每笔最大持有天数，默认 30
   minBuyCount?: number;   // 最低看多策略数，默认 1（与实时单策略降级一致）
   fees?: { buy: number; sell: number };
+  maxStockWeight?: number;     // 单股最大权重，默认 0.20（手册：单股≤20%）
+  accountDrawdownHalt?: number; // 账户级回撤熔断阈值，默认 0.15（手册 5.3：10-15%）
+  haltCooldownDays?: number;   // 熔断后冷却交易日数（停手复盘期），默认 20；0=永久停手
+  portfolioRisk?: boolean;     // 是否启用组合级风控（仓位上限/集中度/回撤熔断），默认 true
 }
 
 const safe = (v: any): number => (typeof v === 'number' && isFinite(v)) ? v : 0;
 const avg = (a: number[]) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
+
+// 单笔结算：D+1 起的真实 K 线，判定止盈/止损/过期/信号卖出（含手册「强势板块见顶」「MA20 防守」纪律）
+function settleTrade(
+  rows: KlineRow[], idx: number, entry: number, stop: number, take: number,
+  maxHold: number, regime: string, strategies: BacktestStrategy[], voteStrategies: BacktestStrategy[],
+): { exitPrice: number; reason: 'tp' | 'sl' | 'expire' | 'signal'; exitDate: string; holdDays: number } {
+  const future = rows.slice(idx + 1, idx + 1 + maxHold);
+  let exitPrice = entry, reason: 'tp' | 'sl' | 'expire' | 'signal' = 'expire';
+  let exitDate = rows[idx]?.date ?? '', holdDays = 0;
+  let settled = false;
+
+  for (let j = 0; j < future.length; j++) {
+    const day = future[j];
+    if (safe(day.high) >= take) { exitPrice = take; reason = 'tp'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
+    if (safe(day.low) <= stop) { exitPrice = stop; reason = 'sl'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
+
+    // 强势板块见顶法则：大阴线放量跌破5日线，坚决离场
+    const ma5 = safe(day.ma5);
+    if (ma5 !== null && j > 1) {
+      let volSum = 0, volCount = 0;
+      for (let k = 1; k <= 5; k++) { if (idx + 1 + j - k >= 0) { volSum += rows[idx + 1 + j - k].volume; volCount++; } }
+      const volMa5 = volCount > 0 ? volSum / volCount : day.volume;
+      const isBigYin = day.close < day.open && (day.open - day.close) / day.open > 0.02;
+      if (isBigYin && day.close < ma5 && day.volume > volMa5 * 1.5) {
+        exitPrice = safe(day.close); reason = 'signal'; exitDate = day.date; holdDays = j + 1; settled = true; break;
+      }
+    }
+
+    // 手册核心纪律：MA20 防守线 + 动态信号止损（持仓 3 天后启用）
+    if (j > 2) {
+      const ma20 = safe(day.ma20);
+      if (ma20 !== null && safe(day.close) < ma20) {
+        exitPrice = safe(day.close); reason = 'signal'; exitDate = day.date; holdDays = j + 1; settled = true; break;
+      }
+      let sellVotes = 0;
+      for (const gs of voteStrategies) {
+        if (generateSignal(gs.strategy, { ...gs.params, marketRegime: regime } as BacktestParams, rows, idx + 1 + j) === 'sell') sellVotes++;
+      }
+      if (sellVotes > 0) {
+        exitPrice = safe(day.close); reason = 'signal'; exitDate = day.date; holdDays = j + 1; settled = true; break;
+      }
+    }
+  }
+  if (!settled && future.length > 0) {
+    exitPrice = safe(future[future.length - 1].close);
+    exitDate = future[future.length - 1].date;
+    holdDays = future.length;
+  }
+  return { exitPrice, reason, exitDate, holdDays };
+}
 
 /**
  * 推荐引擎历史回放（纯函数）
@@ -88,23 +146,38 @@ export function backtestRecommendationEngine(
 
   const trades: EngineTrade[] = [];
   const lastExitTs = new Map<string, number>(); // code -> 上笔结算时间戳，持仓期内不重复买入
+  const usePortfolioRisk = options.portfolioRisk !== false;
+  const maxStockWeight = options.maxStockWeight ?? 0.20;
+  const ddHalt = options.accountDrawdownHalt ?? 0.15;
+  const cooldownDays = options.haltCooldownDays ?? 20;
+
+  // 账户级回撤熔断（手册 5.3：触及红线全面降仓/停手复盘）——滚动冷却，冷却期内不开新仓
+  let haltCooldown = 0;
+  let everHalted = false;
+  let haltDays = 0;
+  let cumPnl = 0;       // 累计加权盈亏（近似账户净值偏离基准）
+  let peakPnl = 0;
+  let posUsedSum = 0, posUsedCount = 0;
 
   for (let d = startIdx; d < allDates.length; d++) {
     const D = allDates[d];
+    // 冷却期倒计时（停手复盘），冷却结束自动恢复开仓
+    if (haltCooldown > 0) { haltCooldown--; haltDays++; }
     // 大盘环境（截至 D，严格防未来函数）
-    const regime = assessMarketTiming(benchmark.slice(0, d + 1), 'sh000300').regime;
+    const timing = assessMarketTiming(benchmark.slice(0, d + 1), 'sh000300');
+    const regime = timing.regime;
+    const dayMaxPos = usePortfolioRisk ? timing.maxPosition : 1.0;
     const Dts = new Date(D).getTime();
 
+    // Phase 1：收集当日候选买入
+    const candidates: { code: string; rows: KlineRow[]; idx: number; entry: number; stop: number; take: number; buyVotes: string[]; voteStrategies: BacktestStrategy[]; confidence: number }[] = [];
     for (const [code, rows] of klineMap) {
       if (code.startsWith('sh00') || code.startsWith('sz39')) continue; // 跳过指数
       const idx = codeDateIdx.get(code)!.get(D);
       if (idx === undefined || idx < 72) continue;
-
-      // 持仓期未结束则跳过（避免同一只票重复进场）
       const lastExit = lastExitTs.get(code);
       if (lastExit !== undefined && Dts <= lastExit) continue;
 
-      // 全局验证策略 generateSignal（截至 D 的数据，i = idx+1 表示 D 当日信号位）
       let buyCount = 0, sellCount = 0;
       const buyVotes: string[] = [];
       for (const gs of strategies) {
@@ -114,7 +187,6 @@ export function backtestRecommendationEngine(
       }
       if (buyCount < minBuy || sellCount > 0) continue;
 
-      // 入场 + 风控位（用看多策略的全局参数均值）
       const entryRow = rows[idx];
       const entry = safe(entryRow.close);
       if (entry <= 0) continue;
@@ -125,88 +197,45 @@ export function backtestRecommendationEngine(
       const stop = Math.max(entry - 2 * atr, entry * (1 - stopPct));
       const take = entry * (1 + tpPct);
 
-      // 结算：D+1 起的真实 K 线，判定止盈/止损/过期/信号卖出
-      const future = rows.slice(idx + 1, idx + 1 + maxHold);
-      let exitPrice = entry, reason: 'tp' | 'sl' | 'expire' | 'signal' = 'expire', exitDate = D, holdDays = 0;
-      let settled = false;
-      
-      for (let j = 0; j < future.length; j++) {
-        const day = future[j];
-        
-        if (safe(day.high) >= take) { exitPrice = take; reason = 'tp'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
-        if (safe(day.low) <= stop) { exitPrice = stop; reason = 'sl'; exitDate = day.date; holdDays = j + 1; settled = true; break; }
-        
-        // 强势板块见顶法则：大阴线放量跌破5日线，坚决离场
-        const ma5 = safe(day.ma5);
-        if (ma5 !== null && j > 1) {
-           let volSum = 0, volCount = 0;
-           for (let k = 1; k <= 5; k++) {
-             if (idx + 1 + j - k >= 0) { volSum += rows[idx + 1 + j - k].volume; volCount++; }
-           }
-           const volMa5 = volCount > 0 ? volSum / volCount : day.volume;
-           const isBigYin = day.close < day.open && (day.open - day.close) / day.open > 0.02; // 实体>2%的大阴线
-           if (isBigYin && day.close < ma5 && day.volume > volMa5 * 1.5) {
-              exitPrice = safe(day.close);
-              reason = 'signal';
-              exitDate = day.date;
-              holdDays = j + 1;
-              settled = true;
-              break;
-           }
-        }
-        
-        // 动态信号止损：如果在持仓中途，买入策略产生了明确的卖出信号，则提前截断亏损
-        if (j > 2) { // 至少持仓3天后才允许信号止损，避免刚买入的震荡洗盘
-          // 增加手册核心纪律：MA20 防守线。跌破MA20果断止损/止盈
-          const ma20 = safe(day.ma20);
-          if (ma20 !== null && safe(day.close) < ma20) {
-            exitPrice = safe(day.close);
-            reason = 'signal';
-            exitDate = day.date;
-            holdDays = j + 1;
-            settled = true;
-            break;
-          }
-          
-          let sellVotes = 0;
-          for (const gs of voteStrategies) {
-            if (generateSignal(gs.strategy, { ...gs.params, marketRegime: regime } as BacktestParams, rows, idx + 1 + j) === 'sell') {
-              sellVotes++;
-            }
-          }
-          if (sellVotes > 0) {
-            exitPrice = safe(day.close);
-            reason = 'signal';
-            exitDate = day.date;
-            holdDays = j + 1;
-            settled = true;
-            break;
-          }
-        }
-      }
-      if (!settled) {
-        if (future.length > 0) {
-          exitPrice = safe(future[future.length - 1].close);
-          exitDate = future[future.length - 1].date;
-          holdDays = future.length;
-        }
-      }
+      candidates.push({ code, rows, idx, entry, stop, take, buyVotes, voteStrategies, confidence: buyVotes.length });
+    }
 
-      // 扣除双边费率
-      const buyCost = entry * (1 + fees.buy);
-      const sellRev = exitPrice * (1 - fees.sell);
+    // Phase 2：组合级风控——按置信度分配权重（单股≤maxStockWeight，当日总仓位≤dayMaxPos）
+    candidates.sort((a, b) => b.confidence - a.confidence);
+    let remaining = haltCooldown > 0 ? 0 : dayMaxPos;  // 冷却期内不开新仓
+    let dayWeightSum = 0;
+    for (const cand of candidates) {
+      const weight = usePortfolioRisk ? Math.min(maxStockWeight, remaining) : Math.min(maxStockWeight, 1);
+      if (weight <= 0.001) break;
+      if (usePortfolioRisk) remaining -= weight;
+
+      const st = settleTrade(cand.rows, cand.idx, cand.entry, cand.stop, cand.take, maxHold, regime, strategies, cand.voteStrategies);
+      const buyCost = cand.entry * (1 + fees.buy);
+      const sellRev = st.exitPrice * (1 - fees.sell);
       const returnPct = buyCost > 0 ? (sellRev - buyCost) / buyCost : 0;
 
-      trades.push({ code, entryDate: D, exitDate, entry, exit: exitPrice, returnPct, reason, holdDays, buyVotes, regime });
-      lastExitTs.set(code, new Date(exitDate).getTime());
+      trades.push({ code: cand.code, entryDate: D, exitDate: st.exitDate, entry: cand.entry, exit: st.exitPrice, returnPct, reason: st.reason, holdDays: st.holdDays, buyVotes: cand.buyVotes, regime, weight });
+      lastExitTs.set(cand.code, new Date(st.exitDate).getTime());
+
+      // 账户净值近似：累计加权盈亏；触及回撤红线则进入冷却（停手复盘）
+      cumPnl += weight * returnPct;
+      if (cumPnl > peakPnl) peakPnl = cumPnl;
+      dayWeightSum += weight;
+      if ((peakPnl - cumPnl) >= ddHalt) { haltCooldown = cooldownDays; everHalted = true; }
     }
+    if (candidates.length > 0) { posUsedSum += dayWeightSum; posUsedCount++; }
   }
 
-  return computeEngineStats(trades, range, Date.now() - t0);
+  return computeEngineStats(trades, range, Date.now() - t0, {
+    avgPositionUsed: posUsedCount ? posUsedSum / posUsedCount : 0,
+    accountHalted: everHalted,
+    haltDays,
+  });
 }
 
 function computeEngineStats(
-  trades: EngineTrade[], range: { start: string; end: string }, durationMs: number
+  trades: EngineTrade[], range: { start: string; end: string }, durationMs: number,
+  extra?: { avgPositionUsed?: number; accountHalted?: boolean; haltDays?: number },
 ): EngineBacktestResult {
   const total = trades.length;
   const wins = trades.filter(t => t.returnPct > 0);
@@ -214,19 +243,23 @@ function computeEngineStats(
   const avgReturn = total ? trades.reduce((s, t) => s + t.returnPct, 0) / total : 0;
   const avgHoldDays = total ? trades.reduce((s, t) => s + t.holdDays, 0) / total : 0;
 
-  // 按入场月份聚合（等权月度组合）
-  const byMonthMap = new Map<string, number[]>();
+  // 按入场月份聚合（加权组合：当月组合收益 = Σ weight×return）
+  const byMonthMap = new Map<string, { wr: number; w: number; n: number }>();
   for (const t of trades) {
     const m = t.entryDate.slice(0, 7);
-    if (!byMonthMap.has(m)) byMonthMap.set(m, []);
-    byMonthMap.get(m)!.push(t.returnPct);
+    const e = byMonthMap.get(m) ?? { wr: 0, w: 0, n: 0 };
+    e.wr += t.weight * t.returnPct;
+    e.w += t.weight;
+    e.n += 1;
+    byMonthMap.set(m, e);
   }
-  const byMonth = [...byMonthMap.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([month, rets]) => ({
-    month, trades: rets.length, avgReturn: avg(rets),
+  const sortedMonths = [...byMonthMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const byMonth = sortedMonths.map(([month, e]) => ({
+    month, trades: e.n, avgReturn: e.w > 0 ? e.wr / e.w : 0, // 权重加权平均收益率（展示用）
   }));
 
-  // 月度组合收益序列 → 复利累计、年化夏普、最大回撤
-  const monthlyReturns = byMonth.map(b => b.avgReturn);
+  // 月度组合收益序列（组合实际月收益）→ 复利累计、年化夏普、最大回撤
+  const monthlyReturns = sortedMonths.map(([, e]) => e.wr);
   let equity = 1;
   for (const r of monthlyReturns) equity *= (1 + r);
   const totalReturn = equity - 1;
@@ -270,5 +303,10 @@ function computeEngineStats(
     byRegime[reg] = { trades: rets.length, winRate: rets.filter(r => r > 0).length / rets.length, avgReturn: avg(rets) };
   }
 
-  return { totalTrades: total, winRate, avgReturn, totalReturn, sharpe, maxDrawdown: maxDd, avgHoldDays, byStrategy, byRegime, byMonth, range, durationMs };
+  return {
+    totalTrades: total, winRate, avgReturn, totalReturn, sharpe, maxDrawdown: maxDd, avgHoldDays,
+    avgPositionUsed: extra?.avgPositionUsed ?? 0, accountHalted: extra?.accountHalted ?? false,
+    haltDays: extra?.haltDays ?? 0,
+    byStrategy, byRegime, byMonth, range, durationMs,
+  };
 }

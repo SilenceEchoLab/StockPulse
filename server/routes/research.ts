@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
 import {
   researchRuns, strategyOptima, recommendations, stocks as stocksSchema,
-  klineDaily, globalStrategyOptima, strategyCredibility,
+  klineDaily, klineMin, klineLongPeriod, dailySnapshot, globalStrategyOptima, strategyCredibility,
 } from '../db/schema.js';
 import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import {
@@ -22,6 +22,7 @@ import {
 } from '../lib/autoResearch.js';
 import type { StrategyType, BacktestParams } from '../lib/backtestEngine.js';
 import { generateRecommendation } from '../lib/recommender.js';
+import { assessValuation } from '../lib/valuation.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
 import { resolveRecommendations, getPerformanceStats, recomputeStrategyCredibility, applyBacktestCredibility } from '../lib/performanceTracker.js';
 import { backtestRecommendationEngine } from '../lib/recommendationBacktest.js';
@@ -82,9 +83,7 @@ app.post('/optimize', async (c) => {
   }
 
   const db = getDb(c);
-  const promise = runOptimization(db, strategies, maxSamples);
-
-  try { c.executionCtx.waitUntil(promise); } catch { promise.catch(console.error); }
+  runOptimization(db, strategies, maxSamples).catch(e => addResearchLog(`优化异常: ${e?.message || e}`));
 
   return c.json({ success: true, message: `优化已启动: ${strategies.join(', ')}` });
 });
@@ -334,6 +333,16 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
 
   const topSectors = new Set(sectorMomentum.slice(0, 3).map(s => s.industry));
 
+  // 预取每只股票最新估值快照（PE/PB），用于基本面估值分层（手册 2.4）
+  const snapRows = await db.select().from(dailySnapshot).orderBy(desc(dailySnapshot.date)).all() as any[];
+  const latestSnap = new Map<string, { pe: number | null; pb: number | null }>();
+  for (const s of snapRows) {
+    // 按日期倒序遍历，首见即为该股票最新快照
+    if (!latestSnap.has(s.marketCode)) {
+      latestSnap.set(s.marketCode, { pe: s.peRatio ?? null, pb: s.pbRatio ?? null });
+    }
+  }
+
   const buyRecs: any[] = [];
   let totalAnalyzed = 0;
 
@@ -358,12 +367,37 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
       }
     }
 
-    const rec = generateRecommendation(rows, merged, timing.regime, credibility);
+    // 取 60 分钟线供三周期共振第三层「小周期抓节奏」确认（数据不足则降级为两周期）
+    const m60Rows = await db.select().from(klineMin)
+      .where(and(eq(klineMin.marketCode, code), eq(klineMin.period, 'm60')))
+      .orderBy(asc(klineMin.time)).all() as any[];
+    const intraday60 = m60Rows.length >= 35
+      ? m60Rows.map(r => ({ time: r.time, open: r.open, close: r.close, high: r.high, low: r.low, volume: r.volume }))
+      : undefined;
+
+    // 取月线供三周期共振第一层「大周期定方向」硬过滤（月线数据不足则不启用，保持兼容）
+    const monthRows = (await db.select().from(klineLongPeriod)
+      .where(and(eq(klineLongPeriod.marketCode, code), eq(klineLongPeriod.period, 'month')))
+      .orderBy(asc(klineLongPeriod.date)).all()) as any[];
+    const monthly = monthRows.length >= 3 ? monthRows as any : undefined;
+
+    const rec = generateRecommendation(rows, merged, timing.regime, credibility, {
+      maxPosition: timing.maxPosition,  // 接通择时→仓位链：大盘环境决定单股仓位上限
+    }, intraday60, monthly);
     if (rec.action === 'buy' && rec.confidence >= 0.3) {
       const ind = industryMap.get(code);
       if (ind && topSectors.has(ind)) {
         rec.confidence = Math.min(0.95, rec.confidence + 0.20);
         rec.reason += `\n[板块共振] ${ind}板块为近期强势主线，置信度获得额外溢价加成。`;
+      }
+      // 基本面估值叠加（手册 2.4）：高估压低置信度、低估加成；亏损/高估风险标签
+      const snap = latestSnap.get(code);
+      if (snap) {
+        const val = assessValuation(snap.pe, snap.pb);
+        rec.confidence = Math.max(0, Math.min(0.95, rec.confidence + val.confidenceAdj));
+        if (val.tier !== 'fair' && val.tier !== 'unknown') {
+          rec.reason += `\n[估值] ${val.label}(PE=${snap.pe?.toFixed(1) ?? '-'}, PB=${snap.pb?.toFixed(2) ?? '-'})`;
+        }
       }
       buyRecs.push(rec);
     }
@@ -386,7 +420,8 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
       entryPrice: rec.entryPrice,
       stopLoss: rec.stopLoss,
       takeProfit: rec.takeProfit,
-      strategyDetail: JSON.stringify({ buyVotes, votes: rec.voteDetail }),
+      positionSize: rec.positionSize,
+      strategyDetail: JSON.stringify({ buyVotes, votes: rec.voteDetail, riskReward: rec.riskReward, positionValuePct: rec.positionValuePct }),
       reason: rec.reason,
       status: 'active',
       createdAt: new Date(),
