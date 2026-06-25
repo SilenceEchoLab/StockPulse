@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
-import { klineDaily, klineMin } from '../db/schema.js';
+import { klineDaily, klineMin, klineLongPeriod } from '../db/schema.js';
 import { eq, and, asc, desc } from 'drizzle-orm';
 import { calculateIndicators } from '../lib/indicators.js';
 import { fetchWithRetry, getTencentStockData } from '../lib/tencent.js';
@@ -24,10 +24,16 @@ app.get('/:code', async (c) => {
   const period = c.req.query('period') || 'day';
 
   try {
-    let dbData = [];
+    const isLongPeriod = period === 'week' || period === 'month';
+    const syncedMinute = ['m5', 'm30', 'm60'].includes(period as string); // 已落库的分钟周期
+    const isMinPeriod = ['m1', 'm5', 'm15', 'm30', 'm60'].includes(period as string);
+
+    let dbData: any[] = [];
     if (period === 'day') {
       dbData = await getDb(c).select().from(klineDaily).where(eq(klineDaily.marketCode, code)).orderBy(asc(klineDaily.date)).all();
-    } else if (period === 'm30' || period === 'm60') {
+    } else if (isLongPeriod) {
+      dbData = await getDb(c).select().from(klineLongPeriod).where(and(eq(klineLongPeriod.marketCode, code), eq(klineLongPeriod.period, period as string))).orderBy(asc(klineLongPeriod.date)).all();
+    } else if (syncedMinute) {
       dbData = await getDb(c).select().from(klineMin).where(and(eq(klineMin.marketCode, code), eq(klineMin.period, period as string))).orderBy(asc(klineMin.time)).all();
     }
 
@@ -37,7 +43,9 @@ app.get('/:code', async (c) => {
     if (period === 'day' && dbData.length > 0) {
        parsedData = dbData;
        isDailyFromDb = true;
-    } else if ((period === 'm30' || period === 'm60') && dbData.length > 0) {
+    } else if (isLongPeriod && dbData.length > 0) {
+       parsedData = dbData.map(d => ({ date: d.date, open: d.open, close: d.close, high: d.high, low: d.low, volume: d.volume }));
+    } else if (syncedMinute && dbData.length > 0) {
        parsedData = dbData.map(d => ({
           date: d.time.length === 12 ? `${d.time.substring(0,4)}-${d.time.substring(4,6)}-${d.time.substring(6,8)} ${d.time.substring(8,10)}:${d.time.substring(10,12)}` : d.time,
           open: d.open,
@@ -47,14 +55,14 @@ app.get('/:code', async (c) => {
           volume: d.volume
        }));
     } else {
+      // 实时回退：未落库（如 m1/m15）或库中无数据时直接拉腾讯
       let url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${code},${period},,,250,qfq`;
-      const isMinPeriod = ['m1', 'm5', 'm15', 'm30', 'm60'].includes(period as string);
       if (isMinPeriod) {
         url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},${period},,250`;
       } else if (period === 'time') {
         url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},m1,,250`;
       }
-      
+
       const resJson: any = await fetchWithRetry(url);
       if (resJson.code !== 0) {
         // Upstream (Tencent) rejected the request — e.g. bad code/period ("bad params").
@@ -62,12 +70,12 @@ app.get('/:code', async (c) => {
         console.warn(`[kline] upstream rejected code=${code} period=${period}: ${resJson.msg}`);
         return c.json({ success: false, error: resJson.msg || 'Upstream API error' }, 502);
       }
-      
+
       const dataObj = resJson.data[code];
       const actualPeriod = period === 'time' ? 'm1' : period;
       const klineKey = dataObj[`qfq${actualPeriod}`] ? `qfq${actualPeriod}` : actualPeriod;
       const kData = dataObj[klineKey as string] || [];
-      
+
       parsedData = kData.map((item: any[]) => {
         let dateStr = item[0];
         if (dateStr.length === 12) {
