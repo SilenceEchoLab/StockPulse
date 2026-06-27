@@ -34,6 +34,10 @@ export default function AiPicks() {
   const [needsGeneration, setNeedsGeneration] = useState(false);
   const [addedCodes, setAddedCodes] = useState<Set<string>>(new Set());
   const [timing, setTiming] = useState<any>(null);   // 大盘择时上下文（regime/仓位上限）
+  const [edge, setEdge] = useState<any>(null);       // 策略生命力 primitive（AutoResearch 产出）
+  // 全市场选股锦标赛
+  const [screenStatus, setScreenStatus] = useState<any>(null);
+  const [screenResult, setScreenResult] = useState<any>(null);
 
   const addToPool = async (code: string, name: string) => {
     if (addedCodes.has(code)) return;
@@ -44,6 +48,33 @@ export default function AiPicks() {
     });
     setAddedCodes(prev => new Set(prev).add(code));
   };
+
+  // 全市场选股锦标赛：一键启动 + 进度轮询
+  const startScreening = async (topN: number) => {
+    try {
+      const res = await fetch('/api/ai/screen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topN }) });
+      const json = await res.json();
+      if (json.success) {
+        setScreenStatus({ status: 'running', phase: '启动中…', progress: 0 });
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  useEffect(() => {
+    if (screenStatus?.status !== 'running') return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch('/api/ai/screen/status');
+        const json = await res.json();
+        if (json.success) {
+          setScreenStatus(json.data);
+          if (json.data?.result) setScreenResult(json.data.result);
+          if (json.data?.status === 'completed' || json.data?.status === 'error') clearInterval(id);
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(id);
+  }, [screenStatus?.status]);
 
   const strategies = [
     { id: "value", name: "价值发现", desc: "基于基本面与低估值模型", icon: ShieldCheck },
@@ -95,6 +126,10 @@ export default function AiPicks() {
 
   // 切换策略：命中缓存立即展示，否则静默检查是否已生成
   useEffect(() => {
+    // 策略生命力 primitive（一次拉取，作为选股置信度的底料展示）
+    fetch('/api/research/strategy-edge').then(r => r.json()).then(j => { if (j.success) setEdge(j.data); }).catch(() => {});
+    // 恢复已有选股结果（页面刷新后）
+    fetch('/api/ai/screen/status').then(r => r.json()).then(j => { if (j.success) { setScreenStatus(j.data); if (j.data?.result) setScreenResult(j.data.result); } }).catch(() => {});
     const cached = frontendCache[activeStrategy];
     if (cached) {
       setPicks(cached.picks);
@@ -134,11 +169,78 @@ export default function AiPicks() {
           <div className="text-[12px] text-muted">
             建议总仓位上限 <span className="text-white font-mono font-semibold">{Math.round(timing.maxPosition * 100)}%</span>
           </div>
+          {edge && (
+            <div className="text-[12px] text-muted flex items-center gap-1">
+              策略生命力
+              <span className={`font-semibold ${edge.status === '强劲' || edge.status === '可信' ? 'text-trading-up' : edge.status === '观察' ? 'text-yellow-400' : 'text-trading-down'}`}>
+                {edge.status}{edge.trend === 'up' ? '↑' : edge.trend === 'down' ? '↓' : '→'}
+              </span>
+            </div>
+          )}
           <div className="text-[12px] text-body-dark flex-1 min-w-0 truncate">
             当前选股在大盘 <span className="text-white">{timing.regime === 'bull' ? '多头' : timing.regime === 'bear' ? '空头' : '震荡'}</span> 环境下生成，{timing.regime === 'bear' ? '宜轻仓/防御' : timing.regime === 'bull' ? '可积极配置' : '半仓滚动'}
           </div>
         </div>
       )}
+
+      {/* 全市场 LLM 选股锦标赛（一键并行，逐轮淘汰 → Top 10/20） */}
+      <div className="mb-6 shrink-0 bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-[15px] font-semibold text-white">🏆 全市场智能选股</h3>
+            <p className="text-[11px] text-muted mt-0.5">一键并行扫描全市场 · 确定性预筛 → LLM 批量排分 → 选股委员会终评 · 逐轮淘汰</p>
+          </div>
+          {screenStatus?.status !== 'running' && (
+            <div className="flex gap-2">
+              <button onClick={() => startScreening(10)} className="px-3 py-1.5 rounded text-[12px] bg-primary text-ink font-medium hover:opacity-90">一键选 Top 10</button>
+              <button onClick={() => startScreening(20)} className="px-3 py-1.5 rounded text-[12px] bg-surface-elevated-dark text-body-dark border border-hairline-dark hover:text-white">Top 20</button>
+            </div>
+          )}
+        </div>
+
+        {screenStatus?.status === 'running' && (
+          <div className="flex items-center gap-3 py-2">
+            <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0"></div>
+            <div className="flex-1">
+              <div className="flex justify-between text-[12px] mb-1"><span className="text-body-dark">{screenStatus.phase}</span><span className="text-white font-mono">{screenStatus.progress}%</span></div>
+              <div className="w-full h-1.5 bg-surface-elevated-dark rounded-full overflow-hidden"><div className="bg-primary h-full transition-all" style={{ width: `${screenStatus.progress}%` }}></div></div>
+            </div>
+          </div>
+        )}
+
+        {screenStatus?.status === 'error' && (
+          <p className="text-[12px] text-trading-down py-2">选股失败：{screenStatus.error}</p>
+        )}
+
+        {screenResult?.topPicks?.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-hairline-dark">
+            <div className="text-[11px] text-muted mb-2">经 {screenResult.analyzed} 只全市场扫描 → {screenResult.candidates} 候选 → {screenResult.semifinalists} 强 → 最终 Top {screenResult.topPicks.length}（{new Date(screenResult.generatedAt).toLocaleString()}）</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {screenResult.topPicks.map((pick: any, i: number) => {
+                const inPool = addedCodes.has(pick.code);
+                return (
+                  <div key={i} className="flex items-start gap-2 p-2.5 rounded-lg bg-canvas-dark border border-hairline-dark hover:border-primary transition-colors">
+                    <span className={`text-[16px] font-bold font-mono shrink-0 ${pick.rank <= 3 ? 'text-primary' : 'text-muted'}`}>{pick.rank}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[13px] text-white font-medium cursor-pointer hover:text-primary" onClick={() => navigate(`/pool/${pick.code}`)}>{pick.name}</span>
+                        <span className="text-[10px] text-muted font-mono">{pick.code}</span>
+                      </div>
+                      <p className="text-[11px] text-body-dark leading-snug mt-0.5">{pick.reason}</p>
+                      <div className="flex gap-1 mt-1">
+                        {pick.investmentTag && pick.investmentTag !== '无' && <span className="text-[9px] px-1.5 py-0.5 rounded bg-trading-up/10 text-trading-up">投资{pick.investmentTag}</span>}
+                        {pick.speculationTag && pick.speculationTag !== '无' && <span className="text-[9px] px-1.5 py-0.5 rounded bg-yellow-400/10 text-yellow-400">投机{pick.speculationTag}</span>}
+                        {!inPool && <button onClick={() => addToPool(pick.code, pick.name)} className="text-[9px] px-1.5 py-0.5 rounded bg-surface-elevated-dark text-muted hover:text-primary">+ 加入自选</button>}
+                        {inPool && <span className="text-[9px] px-1.5 py-0.5 rounded bg-trading-up/10 text-trading-up">已入池</span>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 shrink-0">
         {strategies.map(s => {

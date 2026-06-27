@@ -159,6 +159,7 @@ export function optimizeStock(
     fees: { buy: 0.0003, sell: 0.0013 },
     slippage: 0.001,
     initialCapital: 1000000,
+    trials: combos.length,  // 多重检验试验数（参数组合数）—— 用于 deflated Sharpe 校正
   };
 
   let best: OptimumResult | null = null;
@@ -245,6 +246,7 @@ export interface OptimaRow {
   paramsJson: string;
   testReturn: number | null;
   testSharpe: number | null;
+  testDeflatedSharpe?: number | null;
   overfitScore: number | null;
   tradeCount: number | null;
   maxDrawdown: number | null;
@@ -255,6 +257,7 @@ export interface GlobalOptimum {
   params: Record<string, number>;
   avgTestReturn: number;
   avgTestSharpe: number;
+  avgDeflatedSharpe: number;
   avgMaxDrawdown: number;
   stabilityScore: number;   // 稳定率 = 稳健子集 / 参与股票，越高策略越普适
   coverageStocks: number;
@@ -308,6 +311,7 @@ export function aggregateGlobalOptima(rows: OptimaRow[]): GlobalOptimum | null {
     params,
     avgTestReturn: avg(r => r.testReturn),
     avgTestSharpe: avg(r => r.testSharpe),
+    avgDeflatedSharpe: avg(r => r.testDeflatedSharpe),
     avgMaxDrawdown: avg(r => r.maxDrawdown),
     stabilityScore: robust.length / sampleStocks,
     coverageStocks: robust.length,

@@ -4,6 +4,7 @@ import { stocks as stocksSchema, alerts, klineDaily } from '../db/schema.js';
 import { eq, asc } from 'drizzle-orm';
 import { getTencentStockData } from '../lib/tencent.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
+import { getPolicy } from '../lib/policy.js';
 
 const app = new Hono();
 
@@ -144,7 +145,12 @@ app.get('/timing', async (c) => {
     if (!rows.length) {
       return c.json({ success: false, error: '指数数据未同步，请先在同步页同步大盘指数' }, 400);
     }
-    const timing = assessMarketTiming(rows as any[], indexCode);
+    // regime→仓位上限读取策略护栏 policy（圆桌「用户可驭层」）；失败回退默认
+    let policy: any = null;
+    try { policy = await getPolicy(db); } catch { /* policy 表未就绪则用默认 */ }
+    const timing = assessMarketTiming(rows as any[], indexCode, policy
+      ? { bull: policy.regimeBullPos, range: policy.regimeRangePos, bear: policy.regimeBearPos }
+      : undefined);
     return c.json({ success: true, data: timing });
   } catch (e: any) {
     console.error('Market timing error:', e);

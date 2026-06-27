@@ -117,6 +117,15 @@ export default function AutoResearch() {
   const [aiDigest, setAiDigest] = useState<string | null>(null);
   const [expandedRecId, setExpandedRecId] = useState<number | null>(null);
   const [klineDataMap, setKlineDataMap] = useState<Record<string, any[]>>({});
+  // 产品化重构（圆桌收敛）：策略生命力 primitive（ONE feature）+ 实验室折叠
+  const [changelog, setChangelog] = useState<any[]>([]);
+  const [policy, setPolicy] = useState<any | null>(null);
+  const [policyPreset, setPolicyPreset] = useState<string>('');
+  const [edge, setEdge] = useState<any | null>(null);
+  const [labOpen, setLabOpen] = useState(false);
+  // LLM 反方审计（圆桌卡帕西/洛佩斯·德·普拉多）
+  const [audit, setAudit] = useState<any | null>(null);
+  const [auditing, setAuditing] = useState(false);
 
   // 推荐引擎历史回放
   const [backtesting, setBacktesting] = useState(false);
@@ -193,13 +202,63 @@ export default function AutoResearch() {
     } catch { /* ignore */ }
   }, []);
 
+  // 圆桌新增三面板的数据拉取
+  const fetchChangelog = useCallback(async () => {
+    try {
+      const res = await fetch('/api/research/changelog?limit=50');
+      const json = await res.json();
+      if (json.success) setChangelog(json.data || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchPolicy = useCallback(async () => {
+    try {
+      const res = await fetch('/api/research/policy');
+      const json = await res.json();
+      if (json.success) setPolicy(json.data);
+    } catch { /* ignore */ }
+  }, []);
+
+  // 策略生命力 primitive（圆桌 ONE feature）—— 一屏四物的主角
+  const fetchEdge = useCallback(async () => {
+    try {
+      const res = await fetch('/api/research/strategy-edge');
+      const json = await res.json();
+      if (json.success) setEdge(json.data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const applyPreset = async (preset: string) => {
+    try {
+      await fetch('/api/research/policy/preset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preset }) });
+      setPolicyPreset(preset);
+      fetchEdge();  // 护栏变了，生命力可能变
+    } catch { /* ignore */ }
+  };
+
+  // LLM 反方审计：调用系统配置大模型，给出"这个 edge 会不会是巧合"的批判 + 通俗解读
+  const runAudit = async () => {
+    setAuditing(true);
+    try {
+      const res = await fetch('/api/research/audit', { method: 'POST' });
+      const json = await res.json();
+      if (json.success) { setAudit(json.data); fetchChangelog(); }
+    } catch { /* ignore */ }
+    setAuditing(false);
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchRecs();
     fetchPerf();
     fetchGlobal();
     fetchCred();
-  }, []);
+    // 产品化重构：加载策略生命力 + 演进日志 + 护栏（一屏四物的数据源）
+    fetchEdge();
+    fetchChangelog();
+    fetchPolicy().then(() => { /* preset 高亮由 GET /policy 返回 */ });
+    fetch('/api/research/policy').then(r => r.json()).then(j => { if (j.success) setPolicyPreset(j.preset || 'custom'); }).catch(() => {});
+  }, [fetchEdge, fetchChangelog, fetchPolicy]);
 
   // 轮询优化进度；优化完成时刷新全局策略与可信度（learn 产出）
   useEffect(() => {
@@ -318,9 +377,107 @@ export default function AutoResearch() {
     <div className="space-y-5 max-w-7xl mx-auto p-6">
       <div className="flex items-center gap-3 mb-2">
         <FlaskConical className="w-7 h-7 text-primary" />
-        <h1 className="text-2xl font-bold text-white">AutoResearch 自动优化引擎</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-white">AutoResearch 策略副驾</h1>
+          <p className="text-[12px] text-muted">机制自主进化 · 策略用户可驭 · 过程全程可读 · 失败自动回退</p>
+        </div>
       </div>
 
+      {/* ══ HERO：策略生命力（圆桌 ONE feature · 一屏四物）══ */}
+      <div className="bg-surface-card-dark rounded-xl p-5 border border-hairline-dark">
+        {/* ① 引擎心跳 */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <span className={cn('w-2 h-2 rounded-full', optimizing ? 'bg-yellow-400 animate-pulse' : status?.status === 'completed' ? 'bg-trading-up' : 'bg-muted')} />
+            <span className="text-[12px] text-muted">{optimizing ? '引擎进化中…' : status?.status === 'completed' ? '引擎就绪 · 自主进化待命' : '引擎空闲'}</span>
+          </div>
+          <span className="text-[11px] text-muted">策略副驾 · 持续假设 · 沙盘试验 · 自动择优</span>
+        </div>
+
+        {/* ② 策略生命力（状态词 + caveat 主角）*/}
+        {edge ? (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-center">
+            <div className="text-center lg:text-left">
+              <div className="text-[12px] text-muted mb-1">策略生命力</div>
+              <div className={cn('text-3xl font-bold leading-none',
+                edge.status === '强劲' ? 'text-trading-up' : edge.status === '可信' ? 'text-trading-up' : edge.status === '观察' ? 'text-yellow-400' : 'text-trading-down')}>
+                {edge.status}
+                <span className="text-lg ml-2">{edge.trend === 'up' ? '↑' : edge.trend === 'down' ? '↓' : '→'}</span>
+              </div>
+              <div className="text-[11px] text-muted mt-1">当前 {edge.regime === 'bull' ? '牛市' : edge.regime === 'bear' ? '弱势' : '震荡'} · {edge.enabledCount} 策略 · {edge.sampleN} 样本</div>
+            </div>
+            <div className="lg:col-span-2 bg-canvas-dark rounded-lg p-3 border-l-2 border-yellow-400">
+              <div className="text-[11px] text-yellow-400 mb-1 font-medium">最该警惕</div>
+              <div className="text-[13px] text-body-dark leading-relaxed">{edge.caveat}</div>
+              <div className="text-[11px] text-muted mt-1.5">{edge.reason}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-muted text-sm py-4 text-center">加载策略生命力…</div>
+        )}
+
+        {/* LLM 反方审计（圆桌卡帕西/洛佩斯·德·普拉多）：让模型当"这个 edge 会不会是巧合"的批判者 */}
+        <div className="mt-4 pt-3 border-t border-hairline-dark">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[12px] text-muted">反方审计</span>
+            <button onClick={runAudit} disabled={auditing}
+              className="px-2.5 py-1 rounded text-[11px] bg-surface-elevated-dark text-body-dark hover:text-white border border-hairline-dark disabled:opacity-50">
+              {auditing ? '审计中…' : audit ? '重新审计' : '让 AI 当反方'}
+            </button>
+            <span className="text-[10px] text-muted">LLM 读 deflated Sharpe 给过拟合批判（解读非证据）</span>
+          </div>
+          {audit && (
+            <div className="text-[12px] text-body-dark bg-canvas-dark rounded p-2.5 border-l-2 border-primary leading-relaxed">
+              {audit.critique}
+              {audit.fallback && <span className="text-[10px] text-muted block mt-1">（LLM 未配置，已降级为规则解读）</span>}
+            </div>
+          )}
+        </div>
+
+        {/* ③ 最近一次自我升级（一行）*/}
+        {changelog[0] && (
+          <div className="mt-4 pt-3 border-t border-hairline-dark flex items-center gap-2 text-[12px]">
+            <span className={cn('px-1.5 py-0.5 rounded text-[10px]', changelog[0].type === 'revert' ? 'bg-trading-down/15 text-trading-down' : changelog[0].type === 'update' ? 'bg-trading-up/15 text-trading-up' : 'bg-primary/15 text-primary')}>{changelog[0].type}</span>
+            <span className="text-body-dark truncate">{changelog[0].message}</span>
+          </div>
+        )}
+
+        {/* ④ 看证据（折叠演进日志）*/}
+        <details className="mt-3">
+          <summary className="text-[12px] text-muted cursor-pointer hover:text-body-dark">查看演进证据（全部自主升级记录）</summary>
+          <div className="mt-2 space-y-1.5 max-h-60 overflow-y-auto">
+            {changelog.map((c: any) => (
+              <div key={c.id} className="flex items-start gap-2 text-[11px]">
+                <span className={cn('px-1.5 py-0.5 rounded shrink-0', c.type === 'revert' ? 'bg-trading-down/15 text-trading-down' : c.type === 'update' ? 'bg-trading-up/15 text-trading-up' : c.type === 'discipline' ? 'bg-yellow-400/15 text-yellow-400' : 'bg-primary/15 text-primary')}>{c.type}</span>
+                <span className="text-muted">{c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
+                <span className="text-body-dark break-all">{c.message}</span>
+              </div>
+            ))}
+            {changelog.length === 0 && <p className="text-muted">暂无记录</p>}
+          </div>
+        </details>
+      </div>
+
+      {/* 护栏三档预设（圆桌特涅夫）：一秒切换，复杂度藏引擎 */}
+      <div className="bg-surface-card-dark rounded-xl p-4 border border-hairline-dark flex items-center gap-3 flex-wrap">
+        <span className="text-[13px] text-white font-medium">风险偏好</span>
+        {[
+          ['conservative', '保守'],
+          ['balanced', '平衡'],
+          ['aggressive', '激进'],
+        ].map(([k, label]) => (
+          <button key={k} onClick={() => applyPreset(k)}
+            className={cn('px-3 py-1 rounded-full text-[12px] transition-colors', policyPreset === k ? 'bg-primary text-ink font-medium' : 'bg-surface-elevated-dark text-muted hover:text-white')}>
+            {label}
+          </button>
+        ))}
+        <span className="text-[11px] text-muted ml-auto">单笔风险 {policy ? (policy.riskPerTrade * 100).toFixed(1) : '1.0'}% · 单股≤{policy ? (policy.maxStockWeight * 100).toFixed(0) : 20}% · 最低盈亏比 {policy?.minRiskReward ?? 1.5}</span>
+      </div>
+
+      {/* 策略实验室（高级）：推翻后折叠——eng操作台/优化/回放/推荐 */}
+      <details open={labOpen} onToggle={e => setLabOpen((e.target as HTMLDetailsElement).open)} className="bg-surface-card-dark rounded-xl border border-hairline-dark overflow-hidden">
+        <summary className="px-4 py-3 cursor-pointer text-[13px] text-muted hover:text-white select-none">策略实验室（高级）· 运行优化 / 全局策略 / 推荐回放 / 今日推荐</summary>
+        <div className="p-4 pt-0 space-y-5">
       {/* 闭环流程图 */}
       <div className="bg-surface-card-dark rounded-xl p-4 border border-hairline-dark">
         <div className="flex items-center justify-between gap-2 text-sm">
@@ -835,6 +992,8 @@ export default function AutoResearch() {
           </div>
         )}
       </div>
+        </div>
+      </details>
     </div>
   );
 }

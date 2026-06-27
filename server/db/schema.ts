@@ -195,6 +195,7 @@ export const strategyOptima = sqliteTable('strategy_optima', {
   paramsJson: text('params_json').notNull(),
   trainSharpe: real('train_sharpe'),
   testSharpe: real('test_sharpe'),
+  testDeflatedSharpe: real('test_deflated_sharpe'), // deflated Sharpe（多重检验校正后）—— edge 显著性地基
   trainReturn: real('train_return'),
   testReturn: real('test_return'),
   trainWinRate: real('train_win_rate'),
@@ -247,6 +248,7 @@ export const globalStrategyOptima = sqliteTable('global_strategy_optima', {
   paramsJson: text('params_json').notNull(),        // 聚合后的全局参数（中位数）
   avgTestReturn: real('avg_test_return'),           // 稳健子集平均测试收益
   avgTestSharpe: real('avg_test_sharpe'),           // 稳健子集平均测试夏普
+  avgDeflatedSharpe: real('avg_deflated_sharpe'),   // 平均 deflated Sharpe（多重检验校正后）
   avgMaxDrawdown: real('avg_max_drawdown'),         // 平均最大回撤
   stabilityScore: real('stability_score'),          // 稳定率 = 稳健子集股票数 / 参与股票数
   coverageStocks: integer('coverage_stocks').notNull().default(0), // 稳健子集股票数
@@ -275,4 +277,49 @@ export const strategyCredibility = sqliteTable('strategy_credibility', {
   blendedCredibility: real('blended_credibility'),
   updatedAt: integer('updated_at', { mode: 'timestamp' }),
 });
+
+// ═══ 策略可信度（按 regime 分桶）—— 圆桌「反脆弱」：同策略在牛/熊是不同策略 ═══
+// 推荐时用当前 regime 对应桶；样本稀疏时回退到 strategy_credibility 的 'all' 聚合
+export const strategyCredibilityByRegime = sqliteTable('strategy_credibility_by_regime', {
+  strategy: text('strategy').notNull(),
+  regime: text('regime').notNull(),         // bull | range | bear
+  realSampleCount: integer('real_sample_count').notNull().default(0),
+  realWinRate: real('real_win_rate'),
+  realAvgReturn: real('real_avg_return'),
+  blendedCredibility: real('blended_credibility'),
+  source: text('source').notNull().default('backtest'), // backtest | real
+  updatedAt: integer('updated_at', { mode: 'timestamp' }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.strategy, table.regime] }),
+}));
+
+// ═══ 策略护栏（policy）—— 圆桌收敛：用户可驭层，机器永不可自动放宽 ═══
+// 单行（id=1）。recommender / backtest / 择时均读取此层；收紧立即生效，放宽需用户确认。
+export const strategyPolicy = sqliteTable('strategy_policy', {
+  id: integer('id').primaryKey(),              // 固定 1（单例）
+  riskPerTrade: real('risk_per_trade'),        // 单笔风险占账户比例（默认 0.01）
+  maxStockWeight: real('max_stock_weight'),    // 单股上限（默认 0.20）
+  accountDrawdownHalt: real('account_drawdown_halt'), // 账户回撤熔断阈值（默认 0.15）
+  haltCooldownDays: integer('halt_cooldown_days'),    // 熔断冷却交易日（默认 20）
+  minRiskReward: real('min_risk_reward'),      // 买入最低盈亏比（默认 1.5）
+  enabledStrategies: text('enabled_strategies'), // 启用策略 JSON 数组
+  regimeBullPos: real('regime_bull_pos'),      // 牛市总仓位上限（默认 0.75）
+  regimeRangePos: real('regime_range_pos'),    // 震荡市（默认 0.50）
+  regimeBearPos: real('regime_bear_pos'),      // 弱势（默认 0.20）
+  updatedAt: integer('updated_at', { mode: 'timestamp' }),
+});
+
+// ═══ 演进日志（changelog）—— 圆桌「过程可读」：每轮 auto-cycle 的不可伪造 diff 证据链 ═══
+// 记录策略参数更新/回退、可信度变化、纪律执行率等，供用户审计"机器对我做了什么"
+export const researchChangelog = sqliteTable('research_changelog', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  type: text('type').notNull(),       // update | revert | credibility | discipline | optimize
+  strategy: text('strategy').notNull(), // 策略名或 'consensus'/'-'
+  regime: text('regime').notNull().default('all'), // all | bull | range | bear
+  message: text('message').notNull(),   // 一句话人类可读摘要
+  details: text('details'),             // JSON: before/after/delta/metrics
+}, (table) => ({
+  createdAtIdx: index('research_changelog_created_idx').on(table.createdAt),
+}));
 

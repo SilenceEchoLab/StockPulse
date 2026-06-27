@@ -43,6 +43,29 @@ export interface BacktestConfig {
   fees: { buy: number; sell: number }; // 费率（含佣金+印花税等）
   slippage?: number;                   // 滑点（默认 0.001）
   initialCapital: number;
+  trials?: number;                     // 多重检验试验数（参数组合×策略数），用于 deflated Sharpe 校正
+}
+
+// deflated Sharpe Ratio（Bailey & López de Prado 2014）—— 多重检验校正
+// 在 N 次试验下，即使零假设(无 edge)，最大夏普的期望 = SE * sqrt(2·ln N)。
+// deflated = 实际年化夏普 - 该期望。>0 才说明校正多重检验后仍有 edge。
+function deflatedSharpeRatio(annualSharpe: number, dailyRets: number[], trials: number): number {
+  const n = dailyRets.length;
+  if (n < 10 || !trials || trials <= 1) return annualSharpe;
+  const mean = dailyRets.reduce((a, b) => a + b, 0) / n;
+  const m2 = dailyRets.reduce((s, r) => s + (r - mean) ** 2, 0) / n;
+  const m3 = dailyRets.reduce((s, r) => s + (r - mean) ** 3, 0) / n;
+  const m4 = dailyRets.reduce((s, r) => s + (r - mean) ** 4, 0) / n;
+  const std = Math.sqrt(m2);
+  if (std === 0) return annualSharpe;
+  const skew = m3 / (std ** 3);
+  const kurt = m4 / (m2 * m2);             // 原始峰度（正态=3）
+  const dailySR = mean / std;
+  // Lo(2002) 夏普方差（日频），含偏度/峰度校正
+  const varSRdaily = (1 - skew * dailySR + (kurt - 1) / 4 * dailySR * dailySR) / (n - 1);
+  const seAnnual = Math.sqrt(Math.max(varSRdaily, 1e-12)) * Math.sqrt(252);
+  const SR0 = seAnnual * Math.sqrt(2 * Math.log(trials));  // 零假设下 N 次试验的期望最大夏普
+  return annualSharpe - SR0;
 }
 
 export interface Trade {
@@ -76,6 +99,7 @@ export interface BacktestMetrics {
   finalCapital: number;
   alpha: number | null;        // 超额收益（相对基准，无基准则 null）
   benchmarkReturn: number | null;
+  deflatedSharpe: number | null; // deflated Sharpe（多重检验校正后）—— edge 显著性地基
 }
 
 export interface BacktestResult {
@@ -288,7 +312,7 @@ export function runBacktest(
       totalReturn: 0, annualizedReturn: 0, maxDrawdown: 0, winRate: 0,
       sharpeRatio: 0, sortinoRatio: 0, calmarRatio: 0, profitFactor: 0,
       avgWin: 0, avgLoss: 0, maxConsecutiveLosses: 0, avgHoldDays: 0,
-      tradeCount: 0, finalCapital: initialCapital, alpha: null, benchmarkReturn: null,
+      tradeCount: 0, finalCapital: initialCapital, alpha: null, benchmarkReturn: null, deflatedSharpe: null,
     },
     trades: [], equityCurve: [],
   };
@@ -477,7 +501,7 @@ export function runBacktest(
 
   return {
     marketCode: code,
-    metrics: computeMetrics(trades, dailyReturns, equityCurve, cash, initialCapital, benchmark),
+    metrics: computeMetrics(trades, dailyReturns, equityCurve, cash, initialCapital, benchmark, config.trials),
     trades,
     equityCurve,
   };
@@ -486,7 +510,7 @@ export function runBacktest(
 // ── 指标计算 ──
 function computeMetrics(
   trades: Trade[], dailyReturns: number[], equityCurve: { date: string; equity: number }[],
-  finalCapital: number, initialCapital: number, benchmark?: KlineRow[]
+  finalCapital: number, initialCapital: number, benchmark?: KlineRow[], trials?: number
 ): BacktestMetrics {
   const totalReturn = (finalCapital - initialCapital) / initialCapital;
   const tradingDays = equityCurve.length;
@@ -557,5 +581,6 @@ function computeMetrics(
     profitFactor: profitFactor === Infinity ? 99 : profitFactor,
     avgWin, avgLoss, maxConsecutiveLosses: maxConsecLoss, avgHoldDays,
     tradeCount: closedTrades.length, finalCapital, alpha, benchmarkReturn,
+    deflatedSharpe: deflatedSharpeRatio(sharpe, dailyReturns, trials ?? 0),
   };
 }

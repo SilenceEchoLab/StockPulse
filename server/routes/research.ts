@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { getDb } from '../db/getDb.js';
 import {
   researchRuns, strategyOptima, recommendations, stocks as stocksSchema,
-  klineDaily, klineMin, klineLongPeriod, dailySnapshot, globalStrategyOptima, strategyCredibility,
+  klineDaily, klineMin, klineLongPeriod, dailySnapshot, globalStrategyOptima, strategyCredibility, strategyCredibilityByRegime,
 } from '../db/schema.js';
 import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import {
@@ -23,6 +23,10 @@ import {
 import type { StrategyType, BacktestParams } from '../lib/backtestEngine.js';
 import { generateRecommendation } from '../lib/recommender.js';
 import { assessValuation } from '../lib/valuation.js';
+import { getPolicy, savePolicy, DEFAULT_POLICY, regimePosition, POLICY_PRESETS, detectPreset, type PolicyPreset } from '../lib/policy.js';
+import { appendChangelog, getChangelog } from '../lib/changelog.js';
+import { computeStrategyEdge } from '../lib/strategyEdge.js';
+import { auditStrategyLab } from '../lib/llmAuditor.js';
 import { assessMarketTiming } from '../lib/marketTiming.js';
 import { resolveRecommendations, getPerformanceStats, recomputeStrategyCredibility, applyBacktestCredibility } from '../lib/performanceTracker.js';
 import { backtestRecommendationEngine } from '../lib/recommendationBacktest.js';
@@ -42,22 +46,51 @@ async function aggregateGlobalForAll(db: any, regime = 'all') {
       .where(eq(strategyOptima.strategy, strategy)).all() as any[];
     const optimaRows = rows.map((r: any) => ({
       paramsJson: r.paramsJson, testReturn: r.testReturn, testSharpe: r.testSharpe,
+      testDeflatedSharpe: r.testDeflatedSharpe ?? null,
       overfitScore: r.overfitScore, tradeCount: r.tradeCount,
       maxDrawdown: r.maxDrawdown, compositeScore: r.compositeScore,
     }));
     const g = aggregateGlobalOptima(optimaRows);
+    // 读取在用版（incumbent）用于可证伪回退契约
+    const incumbent = await db.select().from(globalStrategyOptima)
+      .where(and(eq(globalStrategyOptima.strategy, strategy), eq(globalStrategyOptima.regime, regime))).get() as any;
+    const newSharpe = g?.avgTestSharpe ?? null;
+    const incSharpe = incumbent?.avgTestSharpe ?? null;
+    let reverted = false;
+    let appliedSharpe: number | null = newSharpe;
     if (g) {
-      const row = {
+      // 契约：有在用版且新版样本外夏普更低 ⇒ 回退（不覆盖），否则接受新版
+      if (incumbent && incSharpe !== null && newSharpe !== null && newSharpe < incSharpe) {
+        reverted = true;
+        appliedSharpe = incSharpe;
+      } else {
+        const row = {
+          strategy, regime,
+          paramsJson: JSON.stringify(g.params),
+          avgTestReturn: g.avgTestReturn, avgTestSharpe: g.avgTestSharpe,
+          avgDeflatedSharpe: g.avgDeflatedSharpe,
+          avgMaxDrawdown: g.avgMaxDrawdown, stabilityScore: g.stabilityScore,
+          coverageStocks: g.coverageStocks, sampleStocks: g.sampleStocks,
+          aggregatedAt: new Date(),
+        };
+        await db.insert(globalStrategyOptima).values(row).onConflictDoUpdate({
+          target: [globalStrategyOptima.strategy, globalStrategyOptima.regime], set: row,
+        }).run();
+      }
+      // 写演进日志（不可伪造证据链）
+      await appendChangelog(db, {
+        type: reverted ? 'revert' : 'update',
         strategy, regime,
-        paramsJson: JSON.stringify(g.params),
-        avgTestReturn: g.avgTestReturn, avgTestSharpe: g.avgTestSharpe,
-        avgMaxDrawdown: g.avgMaxDrawdown, stabilityScore: g.stabilityScore,
-        coverageStocks: g.coverageStocks, sampleStocks: g.sampleStocks,
-        aggregatedAt: new Date(),
-      };
-      await db.insert(globalStrategyOptima).values(row).onConflictDoUpdate({
-        target: [globalStrategyOptima.strategy, globalStrategyOptima.regime], set: row,
-      }).run();
+        message: reverted
+          ? `${strategy}: 样本外夏普 ${newSharpe!.toFixed(2)} < 在用 ${incSharpe!.toFixed(2)}，已回退在用版`
+          : `${strategy}: 接受新版（样本外夏普 ${newSharpe!.toFixed(2)} ≥ 在用 ${incSharpe?.toFixed(2) ?? '无'}）`,
+        details: {
+          incumbentSharpe: incSharpe, newSharpe,
+          incumbentParams: incumbent?.paramsJson ?? null,
+          newParams: g.params,
+          avgTestReturn: g.avgTestReturn, stability: g.stabilityScore, coverage: g.coverageStocks,
+        },
+      });
     }
     results.push({
       strategy,
@@ -65,6 +98,8 @@ async function aggregateGlobalForAll(db: any, regime = 'all') {
       coverage: g?.coverageStocks ?? 0,
       sample: rows.length,
       avgTestReturn: g?.avgTestReturn ?? null,
+      avgTestSharpe: appliedSharpe,
+      reverted,
     });
   }
   return results;
@@ -165,6 +200,7 @@ export async function runOptimization(db: any, strategies: StrategyType[], maxSa
             paramsJson: JSON.stringify(optimum.params),
             trainSharpe: optimum.trainMetrics.sharpeRatio,
             testSharpe: optimum.testMetrics.sharpeRatio,
+            testDeflatedSharpe: optimum.testMetrics.deflatedSharpe,
             trainReturn: optimum.trainMetrics.totalReturn,
             testReturn: optimum.testMetrics.totalReturn,
             trainWinRate: optimum.trainMetrics.winRate,
@@ -180,6 +216,7 @@ export async function runOptimization(db: any, strategies: StrategyType[], maxSa
               paramsJson: JSON.stringify(optimum.params),
               trainSharpe: optimum.trainMetrics.sharpeRatio,
               testSharpe: optimum.testMetrics.sharpeRatio,
+              testDeflatedSharpe: optimum.testMetrics.deflatedSharpe,
               trainReturn: optimum.trainMetrics.totalReturn,
               testReturn: optimum.testMetrics.totalReturn,
               trainWinRate: optimum.trainMetrics.winRate,
@@ -248,6 +285,80 @@ app.get('/status', (c) => {
   });
 });
 
+// ── 策略护栏 policy（圆桌「用户可驭层」）：机器不可自动放宽 ──
+app.get('/policy', async (c) => {
+  try {
+    const policy = await getPolicy(getDb(c));
+    return c.json({ success: true, data: policy, preset: detectPreset(policy) });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── 护栏三档预设：保守/平衡/激进，一秒切换 ──
+app.post('/policy/preset', async (c) => {
+  try {
+    const { preset } = (await c.req.json().catch(() => ({}))) as any;
+    if (!['conservative', 'balanced', 'aggressive'].includes(preset)) {
+      return c.json({ success: false, error: '无效预设' }, 400);
+    }
+    const cur = await getPolicy(getDb(c));
+    const merged = await savePolicy(getDb(c), { ...cur, ...POLICY_PRESETS[preset as PolicyPreset] });
+    return c.json({ success: true, data: merged, preset });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+app.post('/policy', async (c) => {
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as any;
+    const merged = await savePolicy(getDb(c), body || {});
+    return c.json({ success: true, data: merged });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── 演进日志（changelog）：策略自我升级的不可伪造证据链 ──
+app.get('/changelog', async (c) => {
+  try {
+    const limit = Math.min(Number(c.req.query('limit') || 50), 200);
+    const rows = await getChangelog(getDb(c), limit);
+    return c.json({ success: true, data: rows });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── 策略生命力 primitive（圆桌 ONE feature）：一次计算，首页/AI选股/个股/本页多处消费 ──
+app.get('/strategy-edge', async (c) => {
+  try {
+    const edge = await computeStrategyEdge(getDb(c));
+    return c.json({ success: true, data: edge });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── LLM 审计员（反方辩护人）：复用系统配置大模型，读 metrics+deflated Sharpe→反方批判+解读 ──
+app.post('/audit', async (c) => {
+  try {
+    const db = getDb(c);
+    const audit = await auditStrategyLab(c, db);
+    // 写入演进日志（标注"解读非证据"），作为过程可读的一环
+    await appendChangelog(db, {
+      type: 'audit', strategy: 'consensus', regime: 'all',
+      message: `LLM 审计${audit.fallback ? '(降级)' : `(${audit.model})`}：${audit.critique.slice(0, 120)}`,
+      details: { critique: audit.critique, deflatedAvg: audit.deflatedAvg, fallback: audit.fallback, isEvidence: false },
+    });
+    return c.json({ success: true, data: audit });
+  } catch (e: any) {
+    console.error('Audit error:', e);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
 // ── 生成当日推荐（核心逻辑，供 /recommend 与 /auto-cycle 复用）──
 // 闭环关键：全局策略兜底缺失策略 + 可信度加权投票 + 写入投票归因（learn 数据源）
 async function generateTodayRecommendations(db: any, opts: { force?: boolean } = {}) {
@@ -268,7 +379,11 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
   if (benchmark.length < 60) {
     return { success: false, error: '沪深300数据不足，无法判定大盘择时', today };
   }
-  const timing = assessMarketTiming(benchmark, 'sh000300');
+  // 策略护栏（policy）：regime→仓位上限、策略开关、风险参数（用户可驭层）
+  const policy = await getPolicy(db);
+  const timing = assessMarketTiming(benchmark, 'sh000300', {
+    bull: policy.regimeBullPos, range: policy.regimeRangePos, bear: policy.regimeBearPos,
+  });
 
   // 读取所有有最优参数的股票
   const optimaRows = await db.select().from(strategyOptima)
@@ -282,10 +397,17 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
   const globalParams = new Map<string, BacktestParams>();
   for (const g of globalRows) globalParams.set(g.strategy, JSON.parse(g.paramsJson));
 
-  // 策略可信度 —— 融合先验(回测)+后验(真实推荐)，用于投票加权
-  const credRows = await db.select().from(strategyCredibility).all() as any[];
+  // 策略可信度 —— 反脆弱：优先用当前 regime 对应桶，缺失则回退 'all' 聚合
   const credibility: Partial<Record<StrategyType, number>> = {};
-  for (const cr of credRows) credibility[cr.strategy as StrategyType] = cr.blendedCredibility ?? 1;
+  // 基线：'all' 聚合
+  const credAll = await db.select().from(strategyCredibility).all() as any[];
+  for (const cr of credAll) credibility[cr.strategy as StrategyType] = cr.blendedCredibility ?? 1;
+  // 覆盖：当前 regime 分桶（样本稀疏时已被先验收缩，安全）
+  const credRegime = await db.select().from(strategyCredibilityByRegime)
+    .where(eq(strategyCredibilityByRegime.regime, timing.regime)).all() as any[];
+  for (const cr of credRegime) {
+    if (cr.blendedCredibility != null) credibility[cr.strategy as StrategyType] = cr.blendedCredibility;
+  }
 
   // 按股票分组最优参数
   const optimaByCode = new Map<string, any[]>();
@@ -354,9 +476,12 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
     totalAnalyzed++;
 
     // 合并：per-stock optima + 缺失策略用全局稳健参数兜底，保证多策略共识完整
+    // 仅纳入 policy 启用的策略（用户开关）
+    const enabledSet = new Set(policy.enabledStrategies);
     const have = new Set(optima.map((o: any) => o.strategy));
-    const merged = [...optima];
+    const merged = [...optima].filter((o: any) => enabledSet.has(o.strategy));
     for (const strat of ALL_STRATEGIES) {
+      if (!enabledSet.has(strat)) continue;            // 用户关闭的策略不参与
       if (!have.has(strat) && globalParams.has(strat)) {
         const g = globalRows.find((x: any) => x.strategy === strat);
         merged.push({
@@ -383,6 +508,9 @@ async function generateTodayRecommendations(db: any, opts: { force?: boolean } =
 
     const rec = generateRecommendation(rows, merged, timing.regime, credibility, {
       maxPosition: timing.maxPosition,  // 接通择时→仓位链：大盘环境决定单股仓位上限
+      accountEquity: 100000,
+      riskPerTrade: policy.riskPerTrade,   // policy 护栏：单笔风险
+      minRiskReward: policy.minRiskReward, // policy 护栏：最低盈亏比
     }, intraday60, monthly);
     if (rec.action === 'buy' && rec.confidence >= 0.3) {
       const ind = industryMap.get(code);
@@ -515,6 +643,16 @@ app.post('/resolve', async (c) => {
     const result = await resolveRecommendations(db);
     // 结算出新数据后，自动重算策略可信度（真实后验反哺）—— Karpathy learn 环节
     const credibility = await recomputeStrategyCredibility(db);
+    // 纪律复盘（圆桌 Livermore）：把结算分布写入演进日志，作为信号纪律证据
+    if (result.resolved > 0) {
+      const win = result.hitTP;
+      const total = result.resolved;
+      await appendChangelog(db, {
+        type: 'discipline', strategy: 'consensus', regime: 'all',
+        message: `纪律复盘：结算 ${total} 笔 → 止盈 ${result.hitTP}/止损 ${result.hitSL}/信号 ${result.hitSignal}/过期 ${result.expired}`,
+        details: { resolved: total, hitTP: result.hitTP, hitSL: result.hitSL, hitSignal: result.hitSignal, expired: result.expired, winRate: total ? win / total : 0 },
+      });
+    }
     return c.json({ success: true, data: { ...result, credibility } });
   } catch (e: any) {
     console.error('Resolve error:', e);
@@ -553,6 +691,18 @@ app.get('/credibility', async (c) => {
     const db = getDb(c);
     const rows = await db.select().from(strategyCredibility)
       .orderBy(desc(strategyCredibility.blendedCredibility)).all();
+    return c.json({ success: true, data: rows });
+  } catch (e: any) {
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// ── GET /credibility-by-regime: 反脆弱——同策略在牛/熊是不同策略，按 regime 分桶可信度 ──
+app.get('/credibility-by-regime', async (c) => {
+  try {
+    const db = getDb(c);
+    const rows = await db.select().from(strategyCredibilityByRegime)
+      .orderBy(asc(strategyCredibilityByRegime.strategy)).all();
     return c.json({ success: true, data: rows });
   } catch (e: any) {
     return c.json({ success: false, error: 'Internal error' }, 500);
@@ -613,6 +763,7 @@ app.post('/backtest-engine', async (c) => {
   try {
     const { days = 120, maxHoldDays = 30, minBuyCount = 1 } = (await c.req.json().catch(() => ({}))) as any;
     const db = getDb(c);
+    const policy = await getPolicy(db);
 
     const benchmark = await db.select().from(klineDaily)
       .where(eq(klineDaily.marketCode, 'sh000300'))
@@ -643,9 +794,16 @@ app.post('/backtest-engine', async (c) => {
       return c.json({ success: false, error: '请先运行策略优化提炼全局策略' });
     }
 
-    const result = backtestRecommendationEngine(klineMap, benchmark, strategies, { days, maxHoldDays, minBuyCount });
-    // 回放结果反哺策略可信度 —— 用数百笔历史实战淘汰亏钱策略（最强 learn）
-    const credibility = await applyBacktestCredibility(db, result.byStrategy);
+    const result = backtestRecommendationEngine(klineMap, benchmark, strategies, {
+      days, maxHoldDays, minBuyCount,
+      // policy 护栏注入组合风控
+      positionMap: { bull: policy.regimeBullPos, range: policy.regimeRangePos, bear: policy.regimeBearPos },
+      maxStockWeight: policy.maxStockWeight,
+      accountDrawdownHalt: policy.accountDrawdownHalt,
+      haltCooldownDays: policy.haltCooldownDays,
+    });
+    // 回放结果反哺策略可信度（含 regime 分桶）—— 用数百笔历史实战淘汰亏钱策略（最强 learn）
+    const credibility = await applyBacktestCredibility(db, result.byStrategy, result.byStrategyRegime);
     return c.json({ success: true, data: { ...result, strategies: strategies.map(s => s.strategy), credibility } });
   } catch (e: any) {
     console.error('Backtest engine error:', e);

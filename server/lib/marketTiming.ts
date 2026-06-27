@@ -41,8 +41,13 @@ export interface MarketTiming {
 
 /**
  * 评估大盘择时状态。输入指数（建议沪深300 sh000300）日线，至少 60 行。
+ * positionMap：可选的 regime→仓位上限（来自用户策略护栏 policy）；缺省用内置默认。
  */
-export function assessMarketTiming(rows: KlineRow[], indexCode = 'sh000300'): MarketTiming {
+export function assessMarketTiming(
+  rows: KlineRow[],
+  indexCode = 'sh000300',
+  positionMap?: { bull: number; range: number; bear: number },
+): MarketTiming {
   const signals: TimingSignal[] = [];
 
   if (rows.length < 60) {
@@ -187,12 +192,15 @@ export function assessMarketTiming(rows: KlineRow[], indexCode = 'sh000300'): Ma
   let regime: Regime;
   let regimeLabel: string;
   let maxPosition: number;
+  const posBull = positionMap?.bull ?? 0.75;
+  const posRange = positionMap?.range ?? 0.5;
+  const posBear = positionMap?.bear ?? 0.2;
   if (totalScore >= 2) {
-    regime = 'bull'; regimeLabel = '牛市主升（多头共振）'; maxPosition = 0.75;
+    regime = 'bull'; regimeLabel = '牛市主升（多头共振）'; maxPosition = posBull;
   } else if (totalScore <= -2) {
-    regime = 'bear'; regimeLabel = '弱势下跌（空头共振）'; maxPosition = 0.2;
+    regime = 'bear'; regimeLabel = '弱势下跌（空头共振）'; maxPosition = posBear;
   } else {
-    regime = 'range'; regimeLabel = '震荡市（分歧轮动）'; maxPosition = 0.5;
+    regime = 'range'; regimeLabel = '震荡市（分歧轮动）'; maxPosition = posRange;
   }
 
   const suggestion =

@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Plus, Bell, Minus, X } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Plus, Bell, Minus, X, RefreshCw } from "lucide-react";
 import useSWR from "swr";
 import { StockData, type KlineData } from "../types";
 import { KLineChart } from "./KLineChart";
@@ -15,6 +15,8 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
   const [aiSentiment, setAiSentiment] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState<boolean>(true);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [diagnose, setDiagnose] = useState<any | null>(null);
+  const [diagnosing, setDiagnosing] = useState<boolean>(false);
   const [signalReport, setSignalReport] = useState<any>(null);
   const navigate = useNavigate();
 
@@ -61,30 +63,49 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
   const netRatio = totalDisc > 0 ? netDisc / totalDisc : 0;
   const isNetInflow = netDisc >= 0;
 
-  useEffect(() => {
-    const fetchAi = async () => {
-      try {
-        setAiLoading(true);
-        setAiError(null);
-        const res = await fetch(`/api/ai/sentiment/${stock.marketCode}`);
-        const json = await res.json();
-        if (res.ok && json.success) {
-          setAiSentiment(json.data);
+  // AI 诊股（grounded 解读层）：force=true 绕过4小时缓存强制重跑
+  const fetchAi = useCallback(async (force = false) => {
+    try {
+      setAiLoading(true);
+      setAiError(null);
+      const res = await fetch(`/api/ai/sentiment/${stock.marketCode}${force ? '?force=true' : ''}`);
+      const json = await res.json();
+      if (res.ok && json.success) {
+        setAiSentiment(json.data);
+      } else {
+        if (json.error === 'AI_NOT_CONFIGURED') {
+          setAiError('AI_NOT_CONFIGURED');
         } else {
-          if (json.error === 'AI_NOT_CONFIGURED') {
-            setAiError('AI_NOT_CONFIGURED');
-          } else {
-            console.error(json.error);
-          }
+          console.error(json.error);
         }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setAiLoading(false);
       }
-    };
-    fetchAi();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAiLoading(false);
+    }
   }, [stock.marketCode]);
+
+  useEffect(() => { fetchAi(false); }, [fetchAi]);
+
+  // 多轮深度诊断（分析师→反方→综合，3× LLM）
+  const runDiagnose = async () => {
+    try {
+      setDiagnosing(true); setDiagnose(null);
+      const res = await fetch(`/api/ai/diagnose/${stock.marketCode}`, { method: 'POST' });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        if (txt.includes('AI_NOT_CONFIGURED')) { setAiError('AI_NOT_CONFIGURED'); return; }
+        setDiagnose({ error: res.status === 404 ? '深度评估接口未就绪，请重启开发服务器后重试' : `服务异常(${res.status})` });
+        return;
+      }
+      const json = await res.json();
+      if (json.success) setDiagnose(json.data);
+      else if (json.error === 'AI_NOT_CONFIGURED') setAiError('AI_NOT_CONFIGURED');
+      else setDiagnose({ error: json.error || '深度评估失败' });
+    } catch (e) { console.error(e); setDiagnose({ error: '深度评估请求失败' }); }
+    finally { setDiagnosing(false); }
+  };
 
   // 量化买卖信号（纯本地引擎，无需 AI Key）
   useEffect(() => {
@@ -339,11 +360,33 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
            <div>
              <div className="flex items-center justify-between mb-3">
                <h4 className="text-[13px] font-medium text-white pl-2 border-l-2 border-primary">
-                 AI 情绪指标
+                 AI 诊股
                </h4>
-               {aiSentiment?.updatedAt && (
-                 <span className="text-[11px] text-muted font-mono">{new Date(aiSentiment.updatedAt).toLocaleTimeString()}</span>
-               )}
+               <div className="flex items-center gap-2">
+                 {aiSentiment?.updatedAt && (
+                   <span className="text-[11px] text-muted font-mono">{new Date(aiSentiment.updatedAt).toLocaleTimeString()}</span>
+                 )}
+                 {aiError !== 'AI_NOT_CONFIGURED' && (
+                   <>
+                   <button
+                     onClick={() => fetchAi(true)}
+                     disabled={aiLoading}
+                     title="重新驱动 AI 分析（绕过缓存）"
+                     className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted hover:text-primary hover:bg-primary/10 border border-hairline-dark transition-colors disabled:opacity-50">
+                     <RefreshCw className={`w-3 h-3 ${aiLoading ? 'animate-spin' : ''}`} />
+                     {aiLoading ? '分析中' : '刷新'}
+                   </button>
+                   <button
+                     onClick={runDiagnose}
+                     disabled={diagnosing || aiLoading}
+                     title="多轮深度评估：分析师诊断 → 反方批判 → 综合结论（3 次 LLM）"
+                     className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted hover:text-primary hover:bg-primary/10 border border-hairline-dark transition-colors disabled:opacity-50">
+                     <RefreshCw className={`w-3 h-3 ${diagnosing ? 'animate-spin' : ''}`} />
+                     {diagnosing ? '深度评估中' : '深度评估'}
+                   </button>
+                   </>
+                 )}
+               </div>
              </div>
              
              {aiLoading ? (
@@ -359,48 +402,115 @@ export default function StockDetails({ stock, onBack }: { stock: StockData; onBa
                  </Button>
                </div>
              ) : aiSentiment ? (
-               <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col">
-                 <div className="flex items-center justify-between mb-4 pb-4 border-b border-hairline-dark">
-                    <div className="flex flex-col">
-                      <span className={`text-[32px] font-mono leading-none ${aiSentiment.score >= 60 ? 'text-trading-up' : aiSentiment.score <= 40 ? 'text-trading-down' : 'text-info'}`}>
-                        {aiSentiment.score}
-                      </span>
-                      <span className="text-[11px] text-muted mt-1">综合评分 (0-100)</span>
-                    </div>
-                    <div className={`px-3 py-1.5 rounded-md text-[13px] font-medium ${
-                      aiSentiment.score >= 60 ? 'bg-trading-up/10 text-trading-up' : 
-                      aiSentiment.score <= 40 ? 'bg-trading-down/10 text-trading-down' : 'bg-surface-elevated-dark text-info'
-                    }`}>
-                      {aiSentiment.label}
-                    </div>
-                 </div>
-
-                 <div className="mb-4">
-                   <h5 className="text-[12px] text-muted mb-2">📊 技术信号</h5>
-                   <div className="flex flex-col gap-2">
-                     {aiSentiment.signals?.map((sig: any, idx: number) => (
-                       <div key={idx} className="flex items-center justify-between text-[12px]">
-                         <div className="flex items-center gap-1.5">
-                           <span className={sig.type === 'bullish' ? 'text-trading-up' : 'text-trading-down'}>
-                             {sig.type === 'bullish' ? '▲' : '▼'}
-                           </span>
-                           <span className="text-body-dark">{sig.name}</span>
-                         </div>
-                         <span className="text-muted font-mono">{(sig.confidence * 100).toFixed(0)}%</span>
-                       </div>
-                     ))}
-                     {(!aiSentiment.signals || aiSentiment.signals.length === 0) && (
-                       <span className="text-[12px] text-muted">暂无显著信号</span>
-                     )}
+               <div className="bg-canvas-dark border border-hairline-dark rounded p-4 flex flex-col gap-4">
+                 {/* 双分对齐：量化(引擎·可靠锚) vs AI 解读 + 一致性徽章 */}
+                 <div className="flex items-center justify-between">
+                   <div className="flex flex-col">
+                     <span className="text-[11px] text-muted mb-0.5">量化·引擎</span>
+                     <span className={`text-[28px] font-mono leading-none ${(aiSentiment.engineScore ?? aiSentiment.score) >= 60 ? 'text-trading-up' : (aiSentiment.engineScore ?? aiSentiment.score) <= 35 ? 'text-trading-down' : 'text-info'}`}>
+                       {aiSentiment.engineScore ?? aiSentiment.score}
+                     </span>
+                   </div>
+                   <div className="flex flex-col items-center">
+                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${aiSentiment.agreement?.conflict ? 'bg-trading-down/15 text-trading-down' : 'bg-trading-up/15 text-trading-up'}`}>
+                       {aiSentiment.agreement?.conflict ? '分歧' : '一致'} {aiSentiment.agreement?.delta != null ? `${aiSentiment.agreement.delta > 0 ? '+' : ''}${aiSentiment.agreement.delta}` : ''}
+                     </span>
+                     <span className="text-[10px] text-muted mt-1">AI vs 引擎</span>
+                   </div>
+                   <div className="flex flex-col items-end">
+                     <span className="text-[11px] text-muted mb-0.5">AI 解读</span>
+                     <span className={`text-[28px] font-mono leading-none ${aiSentiment.score >= 60 ? 'text-trading-up' : aiSentiment.score <= 40 ? 'text-trading-down' : 'text-info'}`}>
+                       {aiSentiment.score}
+                     </span>
                    </div>
                  </div>
-
-                 <div>
-                   <h5 className="text-[12px] text-muted mb-2">💬 AI 点评</h5>
-                   <p className="text-[13px] text-body-dark leading-relaxed">
-                     "{aiSentiment.summary}"
-                   </p>
+                 <div className="text-center">
+                   <span className={`px-2.5 py-1 rounded text-[12px] font-medium ${aiSentiment.score >= 60 ? 'bg-trading-up/10 text-trading-up' : aiSentiment.score <= 40 ? 'bg-trading-down/10 text-trading-down' : 'bg-surface-elevated-dark text-info'}`}>
+                     {aiSentiment.label}
+                   </span>
                  </div>
+
+                 {/* AI 诊断叙事（手册规则的综合人话解读）*/}
+                 <div className="pt-3 border-t border-hairline-dark">
+                   <h5 className="text-[12px] text-muted mb-1.5">💬 AI 诊断</h5>
+                   <p className="text-[13px] text-body-dark leading-relaxed">{aiSentiment.summary}</p>
+                 </div>
+
+                 {/* 震仓 vs 出货（手册 6.4/6.5，引擎盲区 → AI 语义判断）*/}
+                 {aiSentiment.diagnosis && (
+                   <div className="pt-3 border-t border-hairline-dark">
+                     <h5 className="text-[12px] text-muted mb-1.5">🔍 震仓 vs 出货</h5>
+                     <div className="flex items-center gap-2 flex-wrap">
+                       {aiSentiment.diagnosis.isDistributing ? (
+                         <span className="px-2 py-0.5 rounded text-[12px] bg-trading-down/15 text-trading-down font-medium">疑似出货</span>
+                       ) : aiSentiment.diagnosis.isWashing ? (
+                         <span className="px-2 py-0.5 rounded text-[12px] bg-yellow-400/15 text-yellow-400 font-medium">疑似震仓</span>
+                       ) : (
+                         <span className="px-2 py-0.5 rounded text-[12px] bg-surface-elevated-dark text-muted">无明确出货/震仓</span>
+                       )}
+                       <span className="text-[12px] text-muted">{aiSentiment.diagnosis.reason}</span>
+                     </div>
+                   </div>
+                 )}
+
+                 {/* 投资/投机双轴价值（手册：投资=估值+大周期+基本面；投机=情绪+动量+共振）*/}
+                 {(aiSentiment.investmentValue || aiSentiment.speculationValue) && (
+                   <div className="pt-3 border-t border-hairline-dark">
+                     <h5 className="text-[12px] text-muted mb-1.5">⚖️ 价值评估（投资 vs 投机）</h5>
+                     <div className="grid grid-cols-2 gap-2">
+                       {aiSentiment.investmentValue && (
+                         <div className="bg-canvas-dark rounded p-2 border border-hairline-dark">
+                           <div className="flex items-center justify-between mb-0.5">
+                             <span className="text-[11px] text-muted">投资·长线</span>
+                             <span className={`text-[11px] font-medium px-1.5 rounded ${aiSentiment.investmentValue.tag === '高' ? 'bg-trading-up/15 text-trading-up' : aiSentiment.investmentValue.tag === '低' || aiSentiment.investmentValue.tag === '无' ? 'bg-surface-elevated-dark text-muted' : 'bg-yellow-400/15 text-yellow-400'}`}>
+                               {aiSentiment.investmentValue.tag} {aiSentiment.investmentValue.score}
+                             </span>
+                           </div>
+                           <p className="text-[11px] text-body-dark leading-snug">{aiSentiment.investmentValue.reason}</p>
+                         </div>
+                       )}
+                       {aiSentiment.speculationValue && (
+                         <div className="bg-canvas-dark rounded p-2 border border-hairline-dark">
+                           <div className="flex items-center justify-between mb-0.5">
+                             <span className="text-[11px] text-muted">投机·短线</span>
+                             <span className={`text-[11px] font-medium px-1.5 rounded ${aiSentiment.speculationValue.tag === '高' ? 'bg-trading-up/15 text-trading-up' : aiSentiment.speculationValue.tag === '低' || aiSentiment.speculationValue.tag === '无' ? 'bg-surface-elevated-dark text-muted' : 'bg-yellow-400/15 text-yellow-400'}`}>
+                               {aiSentiment.speculationValue.tag} {aiSentiment.speculationValue.score}
+                             </span>
+                           </div>
+                           <p className="text-[11px] text-body-dark leading-snug">{aiSentiment.speculationValue.reason}</p>
+                         </div>
+                       )}
+                     </div>
+                   </div>
+                 )}
+
+                 {/* 多轮深度评估（分析师→反方→综合）；各轮有内容才显示，模型不配合时优雅降级 */}
+                 {diagnose && (
+                   <div className="pt-3 border-t border-hairline-dark space-y-2">
+                     <h5 className="text-[12px] text-muted">🔬 深度评估（三轮闭环）</h5>
+                     {diagnose.error ? (
+                       <p className="text-[11px] text-trading-down">{diagnose.error}</p>
+                     ) : (
+                       <>
+                       {diagnose.round3 && (
+                         <div className="bg-canvas-dark rounded p-2 border-l-2 border-primary">
+                           <div className="text-[11px] text-primary mb-0.5">综合结论（首席策略师）</div>
+                           <p className="text-[11px] text-body-dark leading-snug whitespace-pre-wrap">{diagnose.round3}</p>
+                         </div>
+                       )}
+                       {diagnose.round2 && (
+                         <div className="bg-canvas-dark rounded p-2 border-l-2 border-trading-down">
+                           <div className="text-[11px] text-trading-down mb-0.5">反方意见（魔鬼代言人）</div>
+                           <p className="text-[11px] text-body-dark leading-snug whitespace-pre-wrap">{diagnose.round2}</p>
+                         </div>
+                       )}
+                       {diagnose.round1 && (
+                         <div className="text-[10px] text-muted">分析师初判：{diagnose.round1.label}（{diagnose.round1.score}）· 投资{diagnose.round1.investmentValue?.tag} / 投机{diagnose.round1.speculationValue?.tag}</div>
+                       )}
+                       </>
+                     )}
+                   </div>
+                 )}
                </div>
              ) : (
                <div className="bg-canvas-dark border border-hairline-dark rounded p-4 text-center py-8">

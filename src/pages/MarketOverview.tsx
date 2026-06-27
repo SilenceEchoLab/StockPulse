@@ -20,6 +20,9 @@ export default function MarketOverview() {
   // 大盘择时（手册 STEP1）：决定仓位上限，作为每日决策锚点
   const { data: timingData } = useSWR("/api/market/timing?code=sh000300", fetcher, { refreshInterval: 60_000 });
   const timing = timingData?.data;
+  // 策略生命力 primitive（AutoResearch 产出，注入首页消费）
+  const { data: edgeData } = useSWR("/api/research/strategy-edge", fetcher, { refreshInterval: 60_000 });
+  const edge = edgeData?.data;
 
   const overview = data?.data;
 
@@ -84,6 +87,15 @@ export default function MarketOverview() {
             </h3>
             <span className="text-[11px] text-muted">沪深300 · {timing.asOf}</span>
           </div>
+          {edge && (
+            <a href="#/research" className="flex items-center gap-2 mb-3 px-3 py-1.5 rounded-lg bg-canvas-dark border border-hairline-dark hover:border-primary transition-colors">
+              <span className="text-[11px] text-muted">策略生命力</span>
+              <span className={cn("text-[13px] font-semibold", edge.status === '强劲' || edge.status === '可信' ? 'text-trading-up' : edge.status === '观察' ? 'text-yellow-400' : 'text-trading-down')}>
+                {edge.status}{edge.trend === 'up' ? '↑' : edge.trend === 'down' ? '↓' : '→'}
+              </span>
+              <span className="text-[11px] text-muted truncate flex-1">{edge.caveat}</span>
+            </a>
+          )}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 items-center">
             <div>
               <div className="text-[11px] text-muted mb-1">大盘环境</div>

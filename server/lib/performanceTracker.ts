@@ -4,7 +4,7 @@
 // 结算实际收益并回写 returnPct/holdDays/status，形成策略优化的反馈数据。
 
 import { eq, and, sql } from 'drizzle-orm';
-import { klineDaily, recommendations, strategyOptima, strategyCredibility } from '../db/schema.js';
+import { klineDaily, recommendations, strategyOptima, strategyCredibility, strategyCredibilityByRegime } from '../db/schema.js';
 import { computeBacktestPrior } from './autoResearch.js';
 
 // 贝叶斯先验强度：需积累 N 个真实样本，后验权重才升至 0.5
@@ -281,9 +281,12 @@ export async function recomputeStrategyCredibility(db: any) {
  */
 export async function applyBacktestCredibility(
   db: any,
-  byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>
+  byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>,
+  byStrategyRegime?: Record<string, { trades: number; winRate: number; avgReturn: number }>,
 ) {
   const results: any[] = [];
+  // 先聚合每个策略的先验（复用）
+  const priorCache = new Map<string, { score: number; avgReturn: number; avgSharpe: number; stockCount: number }>();
   for (const strategy of Object.keys(byStrategy)) {
     const stat = byStrategy[strategy];
 
@@ -295,6 +298,7 @@ export async function applyBacktestCredibility(
       overfitScore: r.overfitScore, tradeCount: r.tradeCount,
       maxDrawdown: r.maxDrawdown, compositeScore: r.compositeScore,
     })));
+    priorCache.set(strategy, prior);
 
     // 后验：历史回放（数百笔实战，w 接近 1，主导 blended）
     const realSampleCount = stat.trades;
@@ -321,6 +325,29 @@ export async function applyBacktestCredibility(
       strategy, realSampleCount, realWinRate, realAvgReturn,
       priorScore: prior.score, blendedCredibility: row.blendedCredibility,
     });
+  }
+
+  // 反脆弱：按 regime 分桶写入 strategy_credibility_by_regime（同策略在牛/熊是不同策略）
+  if (byStrategyRegime) {
+    for (const [key, stat] of Object.entries(byStrategyRegime)) {
+      const [strategy, regime] = key.split('|');
+      if (!['bull', 'range', 'bear'].includes(regime)) continue;
+      const prior = priorCache.get(strategy) ?? { score: 0, avgReturn: 0, avgSharpe: 0, stockCount: 0 };
+      const winFactor = stat.winRate;
+      const retFactor = Math.max(0, Math.min(1, (stat.avgReturn + 0.1) / 0.3));
+      const postScore = stat.trades > 0 ? winFactor * retFactor : null;
+      // regime 桶样本可能稀疏，提高先验强度（PRIOR_STRENGTH ×2）避免稀疏后验主导
+      const w = stat.trades / (stat.trades + PRIOR_STRENGTH * 2);
+      const blended = postScore !== null ? prior.score * (1 - w) + postScore * w : prior.score;
+      const row = {
+        strategy, regime,
+        realSampleCount: stat.trades, realWinRate: stat.winRate, realAvgReturn: stat.avgReturn,
+        blendedCredibility: Math.round(blended * 1000) / 1000,
+        source: 'backtest', updatedAt: new Date(),
+      };
+      await db.insert(strategyCredibilityByRegime).values(row)
+        .onConflictDoUpdate({ target: [strategyCredibilityByRegime.strategy, strategyCredibilityByRegime.regime], set: row }).run();
+    }
   }
   return results;
 }

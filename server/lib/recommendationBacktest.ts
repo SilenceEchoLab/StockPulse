@@ -43,6 +43,7 @@ export interface EngineBacktestResult {
   haltDays: number;        // 熔断冷却占用交易日数（停手复盘期）
   byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }>;
   byRegime: Record<string, { trades: number; winRate: number; avgReturn: number }>;
+  byStrategyRegime: Record<string, { trades: number; winRate: number; avgReturn: number }>;
   byMonth: { month: string; trades: number; avgReturn: number }[];
   range: { start: string; end: string };
   durationMs: number;
@@ -57,6 +58,7 @@ interface Options {
   accountDrawdownHalt?: number; // 账户级回撤熔断阈值，默认 0.15（手册 5.3：10-15%）
   haltCooldownDays?: number;   // 熔断后冷却交易日数（停手复盘期），默认 20；0=永久停手
   portfolioRisk?: boolean;     // 是否启用组合级风控（仓位上限/集中度/回撤熔断），默认 true
+  positionMap?: { bull: number; range: number; bear: number }; // policy：regime→仓位上限
 }
 
 const safe = (v: any): number => (typeof v === 'number' && isFinite(v)) ? v : 0;
@@ -163,8 +165,8 @@ export function backtestRecommendationEngine(
     const D = allDates[d];
     // 冷却期倒计时（停手复盘），冷却结束自动恢复开仓
     if (haltCooldown > 0) { haltCooldown--; haltDays++; }
-    // 大盘环境（截至 D，严格防未来函数）
-    const timing = assessMarketTiming(benchmark.slice(0, d + 1), 'sh000300');
+    // 大盘环境（截至 D，严格防未来函数）—— regime→仓位上限来自 policy（若提供）
+    const timing = assessMarketTiming(benchmark.slice(0, d + 1), 'sh000300', options.positionMap);
     const regime = timing.regime;
     const dayMaxPos = usePortfolioRisk ? timing.maxPosition : 1.0;
     const Dts = new Date(D).getTime();
@@ -277,19 +279,29 @@ function computeEngineStats(
     if (dd > maxDd) maxDd = dd;
   }
 
-  // 按策略归因（每笔收益归因到所有看多该笔的策略）
+  // 按策略归因（每笔收益归因到所有看多该笔的策略）+ 按策略×regime 归因（反脆弱：同策略在不同 regime 表现不同）
   const stratStats: Record<string, { trades: number; wins: number; sum: number }> = {};
+  const stratRegimeStats: Record<string, { trades: number; wins: number; sum: number }> = {};
   for (const t of trades) {
     for (const v of t.buyVotes) {
       if (!stratStats[v]) stratStats[v] = { trades: 0, wins: 0, sum: 0 };
       stratStats[v].trades++;
       stratStats[v].sum += t.returnPct;
       if (t.returnPct > 0) stratStats[v].wins++;
+      const srKey = `${v}|${t.regime || 'range'}`;
+      if (!stratRegimeStats[srKey]) stratRegimeStats[srKey] = { trades: 0, wins: 0, sum: 0 };
+      stratRegimeStats[srKey].trades++;
+      stratRegimeStats[srKey].sum += t.returnPct;
+      if (t.returnPct > 0) stratRegimeStats[srKey].wins++;
     }
   }
   const byStrategy: Record<string, { trades: number; winRate: number; avgReturn: number }> = {};
   for (const [v, s] of Object.entries(stratStats)) {
     byStrategy[v] = { trades: s.trades, winRate: s.trades ? s.wins / s.trades : 0, avgReturn: s.trades ? s.sum / s.trades : 0 };
+  }
+  const byStrategyRegime: Record<string, { trades: number; winRate: number; avgReturn: number }> = {};
+  for (const [k, s] of Object.entries(stratRegimeStats)) {
+    byStrategyRegime[k] = { trades: s.trades, winRate: s.trades ? s.wins / s.trades : 0, avgReturn: s.trades ? s.sum / s.trades : 0 };
   }
 
   // 按大盘环境
@@ -307,6 +319,6 @@ function computeEngineStats(
     totalTrades: total, winRate, avgReturn, totalReturn, sharpe, maxDrawdown: maxDd, avgHoldDays,
     avgPositionUsed: extra?.avgPositionUsed ?? 0, accountHalted: extra?.accountHalted ?? false,
     haltDays: extra?.haltDays ?? 0,
-    byStrategy, byRegime, byMonth, range, durationMs,
+    byStrategy, byRegime, byStrategyRegime, byMonth, range, durationMs,
   };
 }
