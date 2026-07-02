@@ -15,6 +15,7 @@ import { chatStructured, SENTIMENT_SCHEMA, CRITIQUE_SCHEMA, SYNTHESIS_SCHEMA } f
 import { getTencentStockData } from '../lib/tencent.js';
 import { runScreening, screenState, resetScreenState } from '../lib/stockScreener.js';
 import type { BacktestParams, StrategyType } from '../lib/backtestEngine.js';
+import { logger } from '../lib/logger.js';
 
 const app = new Hono();
 
@@ -243,7 +244,7 @@ app.get('/sentiment/:code', async (c) => {
     const turnoverTier = turnover == null ? '未知' : turnover > 25 ? '高位出货风险' : turnover >= 3 ? '主力活跃' : '沉寂';
 
     const recent10 = rows.slice(-10).map((r: any) =>
-      `${r.date}: 收${r.close}(${(r.pctChg ?? 0).toFixed(1)}%) 量比${(r.volRatio ?? 0).toFixed(2)} 换手${(r.turnoverRate ?? 0).toFixed(1)}%`
+      `${r.date}: 收${r.close}(${(r.pctChg ?? 0).toFixed(1)}%) 量比${(r.volRatio ?? 0).toFixed(2)} 换手${(r.turnoverRate ?? 0).toFixed(1)}% | MA5:${r.ma5?.toFixed(2)} MA20:${r.ma20?.toFixed(2)} MACD:${r.macd?.toFixed(3)} KDJ_J:${r.kdjJ?.toFixed(1)} RSI:${r.rsi14?.toFixed(1)}`
     ).join('\n');
 
     // 主力资金流向（手册 3.7/资金流）—— 腾讯实时行情内/外盘
@@ -375,7 +376,7 @@ ${recent10}`;
     return c.json({ success: true, data: result });
 
   } catch (e: any) {
-    console.error('AI Sentiment Error:', e);
+    logger.error('API', 'AI Sentiment Error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
@@ -433,31 +434,39 @@ app.post('/diagnose/:code', async (c) => {
     ], SENTIMENT_SCHEMA);
 
     // Round 2：反方辩护人（纯文本批判——叙述性内容不强制 JSON，最大化模型遵从度）
+    const r2Messages = [
+      { role: 'system', content: `${TRADING_DOCTRINE}\n你是反方辩护人。针对下面的分析师诊断，用 100-150 字中文指出它可能错在哪（过拟合/体制特定/数据噪声/情绪偏差），并给出你对分析师结论的信心（低/中/高）。直接输出文字，不要 JSON、不要标题。` },
+      { role: 'user', content: `事实:\n${facts}\n\n分析师诊断:\n${JSON.stringify(round1)}` }
+    ];
+    const r2StartTime = Date.now();
+    logger.llm.request('critique', model, { messages: r2Messages });
     const r2 = await ai.chat.completions.create({
       model, temperature: 0.5,
-      messages: [
-        { role: 'system', content: `${TRADING_DOCTRINE}\n你是反方辩护人。针对下面的分析师诊断，用 100-150 字中文指出它可能错在哪（过拟合/体制特定/数据噪声/情绪偏差），并给出你对分析师结论的信心（低/中/高）。直接输出文字，不要 JSON、不要标题。` },
-        { role: 'user', content: `事实:\n${facts}\n\n分析师诊断:\n${JSON.stringify(round1)}` }
-      ]
+      messages: r2Messages as any
     });
     const round2 = r2.choices[0]?.message?.content?.trim() || '';
+    logger.llm.response('critique', Date.now() - r2StartTime, round2);
 
     // Round 3：首席策略师（纯文本综合）
+    const r3Messages = [
+      { role: 'system', content: `${TRADING_DOCTRINE}\n你是首席策略师。综合分析师诊断与反方意见，给最终评估：是否修正分析师的判断、最关键的一点建议、最大的不确定性。120-180 字中文，直接输出文字，不要 JSON、不要标题。` },
+      { role: 'user', content: `事实:\n${facts}\n分析师:\n${JSON.stringify(round1)}\n反方:\n${round2}` }
+    ];
+    const r3StartTime = Date.now();
+    logger.llm.request('synthesis', model, { messages: r3Messages });
     const r3 = await ai.chat.completions.create({
       model, temperature: 0.4,
-      messages: [
-        { role: 'system', content: `${TRADING_DOCTRINE}\n你是首席策略师。综合分析师诊断与反方意见，给最终评估：是否修正分析师的判断、最关键的一点建议、最大的不确定性。120-180 字中文，直接输出文字，不要 JSON、不要标题。` },
-        { role: 'user', content: `事实:\n${facts}\n分析师:\n${JSON.stringify(round1)}\n反方:\n${round2}` }
-      ]
+      messages: r3Messages as any
     });
     const round3 = r3.choices[0]?.message?.content?.trim() || '';
+    logger.llm.response('synthesis', Date.now() - r3StartTime, round3);
 
     return c.json({ success: true, data: { round1, round2, round3, engineScore: engine.score } });
   } catch (e: any) {
     if (e?.message?.includes('API Key is not configured')) {
       return c.json({ success: false, error: 'AI_NOT_CONFIGURED', message: 'Please configure your AI Provider in Settings.' }, 400);
     }
-    console.error('Diagnose error:', e);
+    logger.error('API', 'Diagnose error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
@@ -613,16 +622,21 @@ app.post('/picks', async (c) => {
       const aiClient = await getAiClient(c);
       const aiModel = await getAiModel(c);
       
+      const picksMessages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Data:\n${JSON.stringify(promptData)}` }
+      ];
+      const picksStartTime = Date.now();
+      logger.llm.request('ai_picks', aiModel, { messages: picksMessages });
+
       const response = await aiClient.chat.completions.create({
          model: aiModel,
          response_format: { type: 'json_object' },
-         messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Data:\n${JSON.stringify(promptData)}` }
-         ]
+         messages: picksMessages as any
       });
 
       responseText = response.choices[0]?.message?.content || '{}';
+      logger.llm.response('ai_picks', Date.now() - picksStartTime, responseText);
     } catch (err: any) {
       if (err.message.includes('API Key is not configured')) {
          return c.json({ success: false, error: 'AI_NOT_CONFIGURED', message: 'Please configure your AI Provider in Settings.' }, 400);
@@ -666,7 +680,7 @@ app.post('/picks', async (c) => {
     return c.json({ success: true, cached: false, ...resultData });
 
   } catch (e: any) {
-    console.error('AI Picks Error:', e);
+    logger.error('API', 'AI Picks Error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
@@ -702,7 +716,7 @@ app.get('/signals/:code', async (c) => {
     const report = detectSignals(rows);
     return c.json({ success: true, data: report });
   } catch (e: any) {
-    console.error('Signal detection error:', e);
+    logger.error('API', 'Signal detection error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
@@ -778,16 +792,21 @@ app.post('/review', async (c) => {
       const aiClient = await getAiClient(c);
       const aiModel = await getAiModel(c);
 
+      const reviewMessages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `以下是近${days}天的推荐绩效数据：\n${dataContext}` },
+      ];
+      const reviewStartTime = Date.now();
+      logger.llm.request('ai_review', aiModel, { messages: reviewMessages });
+
       const response = await aiClient.chat.completions.create({
         model: aiModel,
         response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `以下是近${days}天的推荐绩效数据：\n${dataContext}` },
-        ],
+        messages: reviewMessages as any,
       });
 
       responseText = response.choices[0]?.message?.content || '{}';
+      logger.llm.response('ai_review', Date.now() - reviewStartTime, responseText);
     } catch (err: any) {
       if (err.message.includes('API Key is not configured')) {
         return c.json({ success: false, error: 'AI_NOT_CONFIGURED', message: 'Please configure your AI Provider in Settings.' }, 400);
@@ -798,7 +817,7 @@ app.post('/review', async (c) => {
     const parsed = JSON.parse(responseText);
     return c.json({ success: true, data: { ...parsed, statsSummary: stats, generatedAt: new Date() } });
   } catch (e: any) {
-    console.error('AI Review Error:', e);
+    logger.error('API', 'AI Review Error:', e);
     return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
@@ -813,7 +832,7 @@ app.post('/screen', async (c) => {
     resetScreenState();
     const db = getDb(c);
     // 后台异步执行（本地 Node 环境）
-    runScreening(c, db, Math.min(Math.max(topN, 5), 20)).catch(e => console.error('Screening error:', e));
+    runScreening(c, db, Math.min(Math.max(topN, 5), 20)).catch(e => logger.error('API', 'Screening error:', e));
     return c.json({ success: true, message: `选股锦标赛已启动（目标 Top ${topN}）` });
   } catch (e: any) {
     return c.json({ success: false, error: 'Internal error' }, 500);

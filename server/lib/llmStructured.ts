@@ -3,6 +3,8 @@
 //       provider 不支持时降级 json_object + coerceToSchema 按 schema 补默认/校正。
 // 下游因此总能拿到 schema 完整对象，不再因模型"丢字段"而失效。
 
+import { logger } from './logger.js';
+
 export interface SchemaDef {
   name: string;
   schema: any; // 标准 JSON Schema（type/properties/required/additionalProperties:false）
@@ -14,26 +16,40 @@ export interface SchemaDef {
  */
 export async function chatStructured(ai: any, model: string, messages: any[], def: SchemaDef, opts: { temperature?: number; useJsonSchema?: boolean } = {}): Promise<any> {
   const base: any = { model, messages, temperature: opts.temperature ?? 0.4 };
-  // 默认 json_object（兼容所有 OpenAI 兼容模型，避免部分模型不支持 json_schema）；
-  // schema 仍由 coerceToSchema 在解析后强制校验/补全，结构化保证不丢。
-  // 可选：opts.useJsonSchema=true 时优先 json_schema strict（需模型支持，不支持则降级）。
+  const startTime = Date.now();
+  logger.llm.request(def.name, model, { messages, schema: def.name });
+
   if (opts.useJsonSchema === true) {
     try {
       const r = await ai.chat.completions.create({
         ...base,
         response_format: { type: 'json_schema', json_schema: { name: def.name, schema: def.schema, strict: true } },
       });
-      return robustParse(r.choices[0]?.message?.content, def.schema);
+      const result = robustParse(r.choices[0]?.message?.content, def.schema);
+      logger.llm.response(def.name, Date.now() - startTime, result);
+      return result;
     } catch (e: any) {
       const msg = `${e?.message || ''} ${JSON.stringify(e?.error || e?.response?.data || '')}`;
       const unsupported = e?.status === 400 || e?.status === 404 ||
         /json_schema|response_format|unsupported|invalid.{0,20}schema|unknown.*parameter/i.test(msg);
-      if (!unsupported) throw e;
+      if (!unsupported) {
+        logger.llm.error(def.name, e);
+        throw e;
+      }
+      logger.warn('LLM', `json_schema strict not supported, degrading to json_object for ${def.name}`);
       // 不支持 → 降级 json_object
     }
   }
-  const r = await ai.chat.completions.create({ ...base, response_format: { type: 'json_object' } });
-  return robustParse(r.choices[0]?.message?.content, def.schema);
+  
+  try {
+    const r = await ai.chat.completions.create({ ...base, response_format: { type: 'json_object' } });
+    const result = robustParse(r.choices[0]?.message?.content, def.schema);
+    logger.llm.response(def.name, Date.now() - startTime, result);
+    return result;
+  } catch (e: any) {
+    logger.llm.error(def.name, e);
+    throw e;
+  }
 }
 
 /** 容错解析：直解失败则抽取 {...}/[...] 块；都失败则全默认兜底（绝不抛） */

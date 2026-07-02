@@ -64,7 +64,19 @@ async function buildCandidateCards(db: any) {
       comp += (pct >= 20 && pct <= 70) ? 5 : pct > 85 ? -5 : 0;
       comp += Math.min(15, engine.buySignals.length * 3);
       const card = `${code} ${s.name}: 引擎${engine.score}(${engine.scoreLabel},${engine.alignment}) 月线[${m.label}] 周线[${w.bullish ? '多头' : w.label}] 估值[${v?.label ?? '缺失'},PE${snap?.peRatio?.toFixed(1) ?? '-'}] 位置${pct.toFixed(0)}%分位 买入${engine.buySignals.length}个[${engine.buySignals.map((b: any) => b.name).join(',')}] 风险[${engine.riskTags.map((t: any) => t.name).join(',')}] 相对强度[${relStr}]`;
-      cards.push({ code, name: s.name, card, composite: comp, engineScore: engine.score });
+      const recentKlines = rowsT.slice(-30).map(r => ({
+        date: r.date,
+        close: r.close,
+        pctChg: r.pctChg,
+        volume: r.volume,
+        turnoverRate: r.turnoverRate,
+        ma5: r.ma5 ? Number(r.ma5.toFixed(2)) : null,
+        ma20: r.ma20 ? Number(r.ma20.toFixed(2)) : null,
+        macd: r.macd ? Number(r.macd.toFixed(3)) : null,
+        kdjJ: r.kdjJ ? Number(r.kdjJ.toFixed(1)) : null,
+        rsi14: r.rsi14 ? Number(r.rsi14.toFixed(1)) : null
+      }));
+      cards.push({ code, name: s.name, card, composite: comp, engineScore: engine.score, recentKlines });
     } catch { /* 单股失败跳过 */ }
   }
   return cards.sort((a, b) => b.composite - a.composite);
@@ -82,17 +94,23 @@ export async function runScreening(c: any, db: any, topN: number = 10) {
     const ai = await getAiClient(c);
     const model = await getAiModel(c);
 
-    // Phase 1：10 只/批，并行排分
+    // Phase 1：5 只/批，并行排分（缩小批次，加入真实量价数据防幻觉）
     const batches: any[][] = [];
-    for (let i = 0; i < candidates.length; i += 10) batches.push(candidates.slice(i, i + 10));
+    for (let i = 0; i < candidates.length; i += 5) batches.push(candidates.slice(i, i + 5));
     const ranked: any[] = [];
     let doneBatches = 0;
     await Promise.all(batches.map(async (batch) => {
-      const cards = batch.map(x => x.card).join('\n');
+      const payloadData = batch.map(x => ({
+        code: x.code,
+        name: x.name,
+        summaryCard: x.card,
+        recentKlines30Days: x.recentKlines
+      }));
+      const payloadStr = JSON.stringify(payloadData);
       try {
         const res = await chatStructured(ai, model, [
-          { role: 'system', content: `${TRADING_DOCTRINE}\n你是趋势投资选股官。基于下列确定性事实，给每只候选一个 0-100 的"当前推荐度"（综合考虑趋势/结构/估值/位置/风险），并用一句话说明理由。code 字段必须原样复制每行开头的股票代码（如 sh600000）。` },
-          { role: 'user', content: `候选:\n${cards}` }
+          { role: 'system', content: `${TRADING_DOCTRINE}\n你是趋势投资选股官。基于下列确定性事实卡片以及附加的真实近30天K线量价数据，进行深度分析。\n\n【重要任务】\n你必须对输入的**每一只**候选股票进行打分，并把它们**全部**放入 \`picks\` 数组中返回（不得遗漏任何一只，即使你极度不看好，也要给出低分及理由）。\n给每只候选一个 0-100 的"当前推荐度"（综合考虑趋势/结构/估值/位置/风险，以及对真实量价走势的判断），并用一句话说明理由。code 字段必须原样复制每行开头的股票代码（如 sh600000）。` },
+          { role: 'user', content: `候选数据:\n${payloadStr}` }
         ], BATCH_RANK_SCHEMA, { temperature: 0.3 });
         for (const p of (res.picks || [])) {
           // 三路匹配：精确 code / 6 位数字前缀 / 名称
